@@ -5,6 +5,30 @@ This a fork of:
 - https://github.com/victor-upmeet/whisperx-replicate
 - https://replicate.com/victor-upmeet/whisperx
 
+This generates readalbe subtitles (`.srt`) based on: https://github.com/m-bain/whisperX/issues/883
+
+# Development
+
+Python environment:
+
+```sh
+python3.11 -m venv venv
+source venv/bin/activate
+```
+
+Download models:
+
+```sh
+./build.sh
+```
+
+Publish to cog:
+
+```sh
+cog login
+cog push r8.im/dashed/whisperx-subtitles-replicate
+```
+
 # Model Information
 
 WhisperX provides fast automatic speech recognition (70x realtime with large-v3) with word-level timestamps and speaker diarization.
