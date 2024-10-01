@@ -1,10 +1,9 @@
 # whisperX on Replicate
 
-This repo is the codebase behind the following Replicate models, which we use at [Upmeet](https://upmeet.ai):
+This a fork of:
 
-- [victor-upmeet/whisperx](https://replicate.com/victor-upmeet/whisperx) : if you don't know which model to use, use this one. It uses a low-cost hardware, which suits most cases
-- [victor-upmeet/whisperx-a40-large](https://replicate.com/victor-upmeet/whisperx-a40-large) : if you encounter some memory issues with previous models, consider this one. It can happen when dealing with long audio files and performing alignment and/or diarization
-- [victor-upmeet/whisperx-a100-80gb](https://replicate.com/victor-upmeet/whisperx-a100-80gb) : if you encounter some memory issues with previous models, consider this one. It can happen when dealing with long audio files and performing alignment and/or diarization
+- https://github.com/victor-upmeet/whisperx-replicate
+- https://replicate.com/victor-upmeet/whisperx
 
 # Model Information
 
@@ -20,7 +19,7 @@ For more information about WhisperX, including implementation details, see the [
 
 ```
 @misc{bain2023whisperx,
-      title={WhisperX: Time-Accurate Speech Transcription of Long-Form Audio}, 
+      title={WhisperX: Time-Accurate Speech Transcription of Long-Form Audio},
       author={Max Bain and Jaesung Huh and Tengda Han and Andrew Zisserman},
       year={2023},
       eprint={2303.00747},
