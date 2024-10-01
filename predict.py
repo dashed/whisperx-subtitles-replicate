@@ -75,7 +75,7 @@ class Predictor(BasePredictor):
         vad_offset: float = Input(description="VAD offset", default=0.363),
         align_output: bool = Input(
             description="Aligns whisper output to get accurate word-level timestamps",
-            default=False,
+            default=True,
         ),
         diarization: bool = Input(
             description="Assign speaker ID labels", default=False
