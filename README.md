@@ -29,6 +29,15 @@ cog login
 cog push r8.im/dashed/whisperx-subtitles-replicate
 ```
 
+# Usage
+
+Extract audio with:
+
+```
+ffmpeg -i input_video.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 output_audio.wav
+ffmpeg -i input_video.mp4 -vn -acodec aac -b:a 192k output_audio.m4a
+```
+
 # Model Information
 
 WhisperX provides fast automatic speech recognition (70x realtime with large-v3) with word-level timestamps and speaker diarization.
