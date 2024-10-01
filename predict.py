@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import gc
 import math
 import os
@@ -19,6 +20,29 @@ from whisperx.audio import N_SAMPLES, log_mel_spectrogram
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
 device = "cuda"
 whisper_arch = "./models/faster-whisper-large-v3"
+
+
+class Word(TypedDict):
+    end: float
+    word: str
+    score: float
+    start: float
+
+
+class Segment(TypedDict):
+    end: float
+    text: str
+    start: float
+    words: List[Word]
+
+
+class Cue(TypedDict):
+    text: str
+    start: float
+    end: float
+
+
+Segments = List[Segment]
 
 
 class Output(BaseModel):
@@ -213,7 +237,8 @@ class Predictor(BasePredictor):
 
         audio_basename = os.path.basename(str(audio_file)).rsplit(".", 1)[0]
         srt_file = f"/tmp/{audio_basename}.{detected_language}.srt"
-        srt_output = generate_srt(result["segments"])
+        result2 = copy.deepcopy(result)
+        srt_output = generate_srt(result2["segments"])
         with open(srt_file, "w", encoding="utf-8") as srt:
             srt.write(srt_output)
 
@@ -400,28 +425,6 @@ def diarize(audio, result, debug, huggingface_access_token, min_speakers, max_sp
 
     return result
 
-
-class Word(TypedDict):
-    end: float
-    word: str
-    score: float
-    start: float
-
-
-class Segment(TypedDict):
-    end: float
-    text: str
-    start: float
-    words: List[Word]
-
-
-class Cue(TypedDict):
-    text: str
-    start: float
-    end: float
-
-
-Segments = List[Segment]
 
 # Initialize PunctuationModel
 punct_model = PunctuationModel(model="./models/fullstop-punctuation-multilang-large")
