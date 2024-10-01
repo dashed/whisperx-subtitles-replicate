@@ -8,7 +8,7 @@ import re
 import shutil
 import tempfile
 import time
-from typing import Any, List, TypedDict
+from typing import Any, List
 
 import ffmpeg
 import torch
@@ -20,29 +20,6 @@ from whisperx.audio import N_SAMPLES, log_mel_spectrogram
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
 device = "cuda"
 whisper_arch = "./models/faster-whisper-large-v3"
-
-
-class Word(TypedDict):
-    end: float
-    word: str
-    score: float
-    start: float
-
-
-class Segment(TypedDict):
-    end: float
-    text: str
-    start: float
-    words: List[Word]
-
-
-class Cue(TypedDict):
-    text: str
-    start: float
-    end: float
-
-
-Segments = List[Segment]
 
 
 class Output(BaseModel):
@@ -430,11 +407,11 @@ def diarize(audio, result, debug, huggingface_access_token, min_speakers, max_sp
 punct_model = PunctuationModel(model="./models/fullstop-punctuation-multilang-large")
 
 
-def generate_srt(segments: Segments) -> str:
+def generate_srt(segments) -> str:
     srt_index = 1
     output_srt = ""
 
-    all_cues: List[Cue] = []
+    all_cues = []
     for segment in segments:
         text = punct_model.restore_punctuation(segment["text"])
         word_data = segment.get("words", [])
@@ -492,9 +469,9 @@ def extract_words(text: str):
     return set(re.findall(r"\b[\w\']+\b", text.lower()))
 
 
-def split_at_sentence_end(text: str, word_data: List[Word]) -> List[Cue]:
+def split_at_sentence_end(text: str, word_data):
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    result: List[Cue] = []
+    result = []
     current_word_index = 0
     for sentence in sentences:
         sentence = sentence.strip()
@@ -544,9 +521,9 @@ def split_at_sentence_end(text: str, word_data: List[Word]) -> List[Cue]:
     return result
 
 
-def merge_short_cues(cues: List[Cue], min_duration=3):
-    merged_cues: List[Cue] = []
-    current_cue: Cue | None = None
+def merge_short_cues(cues, min_duration=3):
+    merged_cues = []
+    current_cue = None
 
     for cue in cues:
         if current_cue is None:
