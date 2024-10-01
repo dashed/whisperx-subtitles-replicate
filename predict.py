@@ -1,14 +1,10 @@
-from __future__ import annotations
-
-import copy
 import gc
 import math
 import os
-import re
 import shutil
 import tempfile
 import time
-from typing import Any, List
+from typing import Any
 
 import ffmpeg
 import torch
