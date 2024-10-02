@@ -19,6 +19,9 @@ compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accur
 device = "cuda"
 whisper_arch = "./models/faster-whisper-large-v3"
 
+DESIRED_WPS = 4  # Words per second for comfortable reading
+MAX_DURATION = 7.0  # Maximum duration for a cue in seconds
+
 
 class Word(TypedDict):
     end: Optional[float]
@@ -558,33 +561,72 @@ def split_at_sentence_end(segmenter, text: str, word_data: List[Word]) -> List[C
     return result
 
 
-def merge_short_cues(cues: List[Cue], min_duration=3, max_line_length=42, max_lines=2):
+def merge_short_cues(
+    cues: List[Cue],
+    min_duration=3,
+    max_line_length=42,
+    max_lines=2,
+    desired_wps=DESIRED_WPS,
+) -> List[Cue]:
     merged_cues: List[Cue] = []
-    current_cue: Cue | None = None
+    current_cue: Optional[Cue] = None
 
     for cue in cues:
         if current_cue is None:
             current_cue = cue
         else:
-            duration = cue["end"] - current_cue["start"]
-            # Calculate the combined text length
+            # Calculate combined text and duration
             combined_text = current_cue["text"] + " " + cue["text"]
-            # Use the split_subtitle function to see how the text would split
+            combined_word_count = len(combined_text.split())
+            combined_start = current_cue["start"]
+            combined_end = cue["end"]
+            combined_duration = combined_end - combined_start
+
+            # Determine optimal duration based on desired reading speed
+            optimal_duration = combined_word_count / desired_wps
+
+            # Use split_subtitle to check formatting constraints
             split_lines = split_subtitle(
                 combined_text, max_chars=max_line_length
             ).split("\n")
             num_lines = len(split_lines)
-            # Determine if the merged text would exceed acceptable length
-            if duration < min_duration and num_lines <= max_lines:
+
+            # Decide whether to merge based on duration and formatting constraints
+            if (
+                combined_duration < min_duration or combined_duration < optimal_duration
+            ) and num_lines <= max_lines:
                 # Merge the cues
                 current_cue["text"] = combined_text
-                current_cue["end"] = cue["end"]
+                current_cue["end"] = combined_end
             else:
-                # Add the current cue to the list and start a new one
+                # Adjust duration of current cue if needed
+                current_word_count = len(current_cue["text"].split())
+                current_duration = current_cue["end"] - current_cue["start"]
+                optimal_current_duration = current_word_count / desired_wps
+                if (
+                    current_duration < min_duration
+                    or current_duration < optimal_current_duration
+                ):
+                    current_cue["end"] = min(
+                        current_cue["start"]
+                        + max(optimal_current_duration, min_duration),
+                        cue["start"] - 0.1,
+                    )
                 merged_cues.append(current_cue)
                 current_cue = cue
 
     if current_cue:
+        # Adjust duration of the last cue if needed
+        current_word_count = len(current_cue["text"].split())
+        current_duration = current_cue["end"] - current_cue["start"]
+        optimal_current_duration = current_word_count / desired_wps
+        if (
+            current_duration < min_duration
+            or current_duration < optimal_current_duration
+        ):
+            current_cue["end"] = current_cue["start"] + max(
+                optimal_current_duration, min_duration
+            )
         merged_cues.append(current_cue)
 
     return merged_cues
@@ -625,7 +667,12 @@ def split_long_cue_without_word_timings(
 
 
 def split_long_cues_with_word_timings(
-    cues: List[Cue], max_line_length=42, max_lines=2, min_duration=1.0
+    cues: List[Cue],
+    max_line_length=42,
+    max_lines=2,
+    min_duration=5.0 / 6.0,
+    max_duration=MAX_DURATION,
+    desired_wps=DESIRED_WPS,
 ) -> List[Cue]:
     new_cues: List[Cue] = []
     for cue in cues:
@@ -640,6 +687,7 @@ def split_long_cues_with_word_timings(
             new_cues.extend(split_cues)
             continue
 
+        # Chunk the cue based on max_line_length and max_lines
         chunks = []
         current_chunk_words = []
         current_chunk_timings = []
@@ -655,12 +703,10 @@ def split_long_cues_with_word_timings(
 
             if num_lines > max_lines and current_chunk_words:
                 # Adding this word exceeds max_lines, so finalize the current chunk
-                chunk_text = " ".join(current_chunk_words)
-                chunk_word_timings = current_chunk_timings.copy()
                 chunks.append(
                     {
                         "words": current_chunk_words.copy(),
-                        "timings": chunk_word_timings,
+                        "timings": current_chunk_timings.copy(),
                     }
                 )
                 # Start new chunk with the current word
@@ -673,26 +719,25 @@ def split_long_cues_with_word_timings(
 
         # Add any remaining words as a chunk
         if current_chunk_words:
-            chunk_word_timings = current_chunk_timings.copy()
             chunks.append(
                 {
                     "words": current_chunk_words.copy(),
-                    "timings": chunk_word_timings,
+                    "timings": current_chunk_timings.copy(),
                 }
             )
 
-        # Create new cues from chunks and adjust for minimum duration
+        # Process chunks to create new cues with duration adjustments
         for i, chunk in enumerate(chunks):
             chunk_words = chunk["words"]
             chunk_word_timings = chunk["timings"]
             chunk_text = " ".join(chunk_words)
-            chunk_formatted_text = split_subtitle(chunk_text, max_chars=max_line_length)
-            num_lines = len(chunk_formatted_text.split("\n"))
-            # If the chunk still exceeds max_lines, handle accordingly
-            if num_lines > max_lines:
-                # Optional: Implement recursive splitting or accept that this chunk exceeds max_lines
-                # For now, we'll proceed without further splitting
-                pass
+            # chunk_formatted_text = split_subtitle(chunk_text, max_chars=max_line_length)
+            # num_lines = len(chunk_formatted_text.split("\n"))
+            # # If the chunk still exceeds max_lines, handle accordingly
+            # if num_lines > max_lines:
+            #     # Optional: Implement recursive splitting or accept that this chunk exceeds max_lines
+            #     # For now, we'll proceed without further splitting
+            #     pass
 
             # Get start and end times
             start_time = next(
@@ -713,7 +758,16 @@ def split_long_cues_with_word_timings(
             )
             duration = end_time - start_time
 
-            # If the duration is less than min_duration, attempt to merge with adjacent chunks
+            # Calculate speech rate
+            chunk_word_count = len(chunk_words)
+            speech_rate_wps = (
+                chunk_word_count / duration if duration > 0 else float("inf")
+            )
+
+            # Determine optimal duration based on desired reading speed
+            optimal_duration = chunk_word_count / desired_wps
+
+            # Ensure duration is at least min_duration
             if duration < min_duration:
                 # Try to merge with the next chunk
                 if i + 1 < len(chunks):
@@ -748,22 +802,53 @@ def split_long_cues_with_word_timings(
                         prev_cue["text"] = merged_text
                         prev_cue["end"] = end_time
                         # Handle 'word_data'
-                        prev_word_data = prev_cue.get("word_data", None)
-                        if prev_word_data is not None and chunk_word_timings:
-                            prev_cue["word_data"] = prev_word_data + chunk_word_timings
-                        else:
-                            # If either 'word_data' is missing, set it to None
-                            prev_cue["word_data"] = None
+                        prev_word_data = prev_cue.get("word_data", [])
+                        prev_cue["word_data"] = prev_word_data + chunk_word_timings
                         continue
-                # If cannot merge, proceed with the short duration
+                # If cannot merge, proceed with current chunk
                 print(f"Cue '{chunk_text}' has short duration ({duration}s)")
-            # Create the cue
+
+            # Adjust duration based on speech rate
+            adjusted_end_time = end_time
+            if speech_rate_wps > desired_wps:
+                # Speech is faster than desired reading speed; increase duration
+                adjusted_duration = max(duration, optimal_duration)
+                adjusted_end_time = start_time + adjusted_duration
+                # Ensure we do not exceed max_duration
+                if adjusted_end_time - start_time > max_duration:
+                    adjusted_end_time = start_time + max_duration
+                # Ensure we do not overlap with next chunk or cue's end
+                next_start_time = (
+                    chunks[i + 1]["timings"][0].get("start", cue["end"])
+                    if i + 1 < len(chunks)
+                    else cue["end"]
+                )
+                if adjusted_end_time > next_start_time:
+                    adjusted_end_time = min(next_start_time - 0.1, adjusted_end_time)
+            elif speech_rate_wps < desired_wps and duration > optimal_duration:
+                # Speech is slower than desired reading speed; decrease duration
+                adjusted_duration = max(optimal_duration, min_duration)
+                adjusted_end_time = start_time + adjusted_duration
+                if adjusted_end_time < end_time:
+                    # We should not shorten the duration below the current duration
+                    adjusted_end_time = end_time
+
+            # Ensure duration is at least min_duration
+            if adjusted_end_time - start_time < min_duration:
+                adjusted_end_time = start_time + min_duration
+
+            # Ensure duration does not exceed max_duration
+            if adjusted_end_time - start_time > max_duration:
+                adjusted_end_time = start_time + max_duration
+
+            # Update the cue
             new_cues.append(
                 {
                     "text": chunk_text,
                     "start": start_time,
-                    "end": end_time,
+                    "end": adjusted_end_time,
                     "word_data": chunk_word_timings,
                 }
             )
+
     return new_cues
