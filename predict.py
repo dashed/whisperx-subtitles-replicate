@@ -20,7 +20,6 @@ device = "cuda"
 whisper_arch = "./models/faster-whisper-large-v3"
 
 DESIRED_WPS = 4  # Words per second for comfortable reading
-MAX_DURATION = 7.0  # Maximum duration for a cue in seconds
 
 
 class Word(TypedDict):
@@ -671,7 +670,6 @@ def split_long_cues_with_word_timings(
     max_line_length=42,
     max_lines=2,
     min_duration=5.0 / 6.0,
-    max_duration=MAX_DURATION,
     desired_wps=DESIRED_WPS,
     max_gap_duration=1.5,  # Maximum acceptable time gap between chunks for merging
 ) -> List[Cue]:
@@ -797,6 +795,9 @@ def split_long_cues_with_word_timings(
                                 "words": merged_words,
                                 "timings": merged_timings,
                             }
+                            # print(
+                            #     f"Merged cues: '{chunk_text}' + '{next_chunk['words']}'"
+                            # )
                             continue  # Skip adding current chunk, as it's merged
                 # Else, try to merge with the previous chunk
                 elif new_cues:
@@ -819,6 +820,8 @@ def split_long_cues_with_word_timings(
                             # Handle 'word_data'
                             prev_word_data = prev_cue.get("word_data", [])
                             prev_cue["word_data"] = prev_word_data + chunk_word_timings
+                            # print(f"Merged cues: '{prev_cue['text']}' + '{chunk_text}'")
+                            # print("end_time", end_time)
                             continue
                 # If cannot merge, proceed with current chunk
                 print(f"Cue '{chunk_text}' has short duration ({duration}s)")
@@ -829,9 +832,6 @@ def split_long_cues_with_word_timings(
                 # Speech is faster than desired reading speed; increase duration
                 adjusted_duration = max(duration, optimal_duration)
                 adjusted_end_time = start_time + adjusted_duration
-                # Ensure we do not exceed max_duration
-                if adjusted_end_time - start_time > max_duration:
-                    adjusted_end_time = start_time + max_duration
                 # Ensure we do not overlap with next chunk or cue's end
                 next_start_time = (
                     chunks[i + 1]["timings"][0].get("start", cue["end"])
@@ -862,4 +862,42 @@ def split_long_cues_with_word_timings(
                 }
             )
 
-    return new_cues
+    # Adjust durations of new_cues based on speech rate
+    adjusted_cues = []
+    for i, cue in enumerate(new_cues):
+        text = cue["text"]
+        start_time = cue["start"]
+        end_time = cue["end"]
+        duration = end_time - start_time
+        word_count = len(text.split())
+        optimal_duration = word_count / desired_wps
+
+        # Adjust duration based on speech rate
+        adjusted_end_time = end_time
+        if duration < optimal_duration:
+            adjusted_end_time = start_time + optimal_duration
+            # Ensure we do not overlap with the next cue
+            next_start_time = (
+                new_cues[i + 1]["start"] if i + 1 < len(new_cues) else cue["end"]
+            )
+            if adjusted_end_time > next_start_time:
+                adjusted_end_time = min(next_start_time - 0.01, adjusted_end_time)
+
+        # Ensure duration is at least min_duration
+        if adjusted_end_time - start_time < min_duration:
+            adjusted_end_time = start_time + min_duration
+            # Ensure we do not overlap with the next cue
+            next_start_time = (
+                new_cues[i + 1]["start"] if i + 1 < len(new_cues) else cue["end"]
+            )
+            if adjusted_end_time > next_start_time:
+                adjusted_end_time = min(next_start_time - 0.01, adjusted_end_time)
+            # If still less than start_time, accept the shorter duration
+            if adjusted_end_time <= start_time:
+                adjusted_end_time = start_time + (next_start_time - start_time) / 2
+
+        # Update cue's end time
+        cue["end"] = adjusted_end_time
+        adjusted_cues.append(cue)
+
+    return adjusted_cues
