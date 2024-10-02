@@ -23,19 +23,6 @@ download "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/pr
 download "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/tokenizer.json" "$faster_whisper_model_dir/tokenizer.json"
 download "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/vocabulary.json" "$faster_whisper_model_dir/vocabulary.json"
 
-# Download fullstop-punctuation-multilang-large model
-punctuation_model_dir=models/fullstop-punctuation-multilang-large
-mkdir -p $punctuation_model_dir
-
-https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large
-https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/commit/88db183baebdc61e721ff1d2d77c1a07ca7ccd11
-download "https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/resolve/main/config.json" "$punctuation_model_dir/config.json"
-download "https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/resolve/main/pytorch_model.bin" "$punctuation_model_dir/pytorch_model.bin"
-download "https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/resolve/main/sentencepiece.bpe.model" "$punctuation_model_dir/sentencepiece.bpe.model"
-download "https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/resolve/main/special_tokens_map.json" "$punctuation_model_dir/special_tokens_map.json"
-download "https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/resolve/main/tokenizer_config.json" "$punctuation_model_dir/tokenizer_config.json"
-download "https://huggingface.co/oliverguhr/fullstop-punctuation-multilang-large/resolve/main/training_args.bin" "$punctuation_model_dir/training_args.bin"
-
 # Download whisperx-vad-segmentation model
 pip install -U git+https://github.com/m-bain/whisperx.git
 

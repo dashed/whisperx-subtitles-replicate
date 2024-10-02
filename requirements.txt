@@ -5,4 +5,3 @@ torchaudio==2.1.0+cu121
 ffmpeg-python
 pyannote.audio
 git+https://github.com/m-bain/whisperx.git
-deepmultilingualpunctuation==1.0.1
