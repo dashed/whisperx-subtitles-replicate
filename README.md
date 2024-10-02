@@ -5,7 +5,26 @@ This a fork of:
 - https://github.com/victor-upmeet/whisperx-replicate
 - https://replicate.com/victor-upmeet/whisperx
 
-This generates readalbe subtitles (`.srt`) based on: https://github.com/m-bain/whisperX/issues/883
+This processes transcribed audio data to generate properly formatted subtitle files (`.srt`). It handles the splitting and merging of subtitle cues based on duration, line length, and line count constraints, ensuring that the resulting subtitles are readable and synchronized with the audio.
+
+Code based on: https://github.com/m-bain/whisperX/issues/883
+
+Here’s a high-level overview of how it achieves this:
+
+1. **Generate transcription:** Uses WhisperX (faster-whisper-large-v3) to generate transcription with word-level timestamps.
+2. **Sentence Segmentation:** It uses the `PySBD` (Python Sentence Boundary Disambiguation) library to split the transcribed text into sentences, respecting language-specific punctuation and sentence boundaries.
+3. **Initial Cue Creation:** For each sentence, the script creates an initial subtitle cue, including start and end times based on word-level timings if available.
+4. **Cue Merging:**
+   - Merges short cues that don't meet a minimum duration (e.g., 3 seconds) to ensure subtitles are displayed long enough for viewers to read.
+   - It carefully merges cues without exceeding maximum line lengths or line counts.
+5. **Cue Splitting:**
+   - Long cues that exceed maximum line lengths or line counts are split into smaller cues.
+   - When splitting, the script uses word-level timings to maintain accurate synchronization with the audio.
+   - It handles cases where word timings are missing by distributing timing proportionally.
+6. **Adjusting for Minimum Duration:**
+   - After splitting, the script checks if any cues are shorter than the minimum duration.
+   - It attempts to merge these short cues with adjacent ones while ensuring formatting constraints are met.
+7. **SRT File Generation:** The script formats each cue according to the SRT specification, including numbering, timing, and text formatting.
 
 # Development
 
