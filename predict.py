@@ -501,6 +501,43 @@ def extract_words(text: str):
     return set(re.findall(r"\b[\w\']+\b", text.lower()))
 
 
+def split_sentence_heuristically(
+    sentence: str, max_line_length: int, max_lines: int
+) -> List[str]:
+    # Check if the sentence exceeds formatting constraints
+    formatted_text = split_subtitle(sentence, max_chars=max_line_length)
+    num_lines = len(formatted_text.split("\n"))
+
+    if num_lines <= max_lines:
+        return [sentence.strip()]
+
+    # If the sentence is too long, split it
+    # Define punctuation and conjunctions to split on
+    split_pattern = re.compile(
+        r"(?<=[,;])\s+|(?<=\s)(?=\b(?:and|but|or|so|because|if|when|while|although|since|after|before|unless|until|where|whereas|whether|as|though)\b)"
+    )
+
+    parts = re.split(split_pattern, sentence)
+    parts = [part.strip() for part in parts if part.strip()]
+
+    # Further split parts if they are still too long
+    final_parts = []
+    for part in parts:
+        formatted_part = split_subtitle(part, max_chars=max_line_length)
+        num_lines_part = len(formatted_part.split("\n"))
+        if num_lines_part > max_lines:
+            # Split long parts at spaces
+            words = part.split()
+            mid_point = len(words) // 2
+            part1 = " ".join(words[:mid_point])
+            part2 = " ".join(words[mid_point:])
+            final_parts.extend([part1.strip(), part2.strip()])
+        else:
+            final_parts.append(part)
+
+    return final_parts
+
+
 def split_at_sentence_end(segmenter, text: str, word_data: List[Word]) -> List[Cue]:
     # sentences = re.split(r"(?<=[.!?])\s+", text)
     sentences = segmenter.segment(text)
@@ -510,53 +547,61 @@ def split_at_sentence_end(segmenter, text: str, word_data: List[Word]) -> List[C
     for sentence in sentences:
         sentence = sentence.strip()
         if sentence:
-            sentence_word_count = len(sentence.split())
-            end = current_word_index + sentence_word_count
-            sentence_word_data = word_data[current_word_index:end]
-            if sentence_word_data:
-                start_time = next(
-                    (word["start"] for word in sentence_word_data if "start" in word),
-                    None,
-                )
-                end_time = next(
-                    (
-                        word["end"]
-                        for word in reversed(sentence_word_data)
-                        if "end" in word
-                    ),
-                    None,
-                )
-                if start_time is not None and end_time is not None:
-                    result.append(
-                        {
-                            "text": sentence,
-                            "start": start_time,
-                            "end": end_time,
-                            "word_data": sentence_word_data,
-                        }
-                    )
-                else:
-                    # If start or end time is missing, use the previous valid timestamp
-                    if result:
-                        prev_end = result[-1]["end"]
-                        result.append(
-                            {
-                                "text": sentence,
-                                "start": prev_end,
-                                "end": prev_end
-                                + 1,  # Add 1 second as a placeholder duration
-                            }
+            clause_splits = split_sentence_heuristically(
+                sentence, max_line_length=42, max_lines=2
+            )
+            for clause in clause_splits:
+                clause = clause.strip()
+                if clause:
+                    clause_word_count = len(clause.split())
+                    end = current_word_index + clause_word_count
+                    clause_word_data = word_data[current_word_index:end]
+                    if clause_word_data:
+                        start_time = next(
+                            (
+                                word["start"]
+                                for word in clause_word_data
+                                if "start" in word
+                            ),
+                            None,
                         )
-                    else:
-                        # If it's the first sentence and times are missing, use 0 as start time
-                        result.append(
-                            {
-                                "text": sentence,
-                                "start": 0,
-                                "end": 1,  # Add 1 second as a placeholder duration
-                            }
+                        end_time = next(
+                            (
+                                word["end"]
+                                for word in reversed(clause_word_data)
+                                if "end" in word
+                            ),
+                            None,
                         )
-            current_word_index += sentence_word_count
+                        if start_time is not None and end_time is not None:
+                            result.append(
+                                {
+                                    "text": clause,
+                                    "start": start_time,
+                                    "end": end_time,
+                                    "word_data": clause_word_data,
+                                }
+                            )
+                        else:
+                            # Handle missing start or end times
+                            if result:
+                                prev_end = result[-1]["end"]
+                                result.append(
+                                    {
+                                        "text": clause,
+                                        "start": prev_end,
+                                        "end": prev_end + 1,
+                                    }
+                                )
+                            else:
+                                result.append(
+                                    {
+                                        "text": clause,
+                                        "start": 0,
+                                        "end": 1,
+                                    }
+                                )
+                    current_word_index += clause_word_count
     return result
 
 
