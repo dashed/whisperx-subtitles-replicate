@@ -837,10 +837,6 @@ def split_long_cues_with_word_timings(
             if adjusted_end_time - start_time < min_duration:
                 adjusted_end_time = start_time + min_duration
 
-            # Ensure duration does not exceed max_duration
-            if adjusted_end_time - start_time > max_duration:
-                adjusted_end_time = start_time + max_duration
-
             # Update the cue
             new_cues.append(
                 {
