@@ -41,7 +41,7 @@ class Cue(TypedDict):
     word_data: Optional[List[Word]]
 
 
-type Segments = List[Segment]
+Segments = List[Segment]
 
 
 class Output(BaseModel):
