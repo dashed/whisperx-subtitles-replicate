@@ -444,12 +444,12 @@ def generate_srt(segments, language) -> str:
 
     # After merging cues
     merged_cues = merge_short_cues(
-        all_cues, min_duration=3, max_line_length=42, max_lines=2
+        all_cues, min_duration=3, max_line_length=35, max_lines=2
     )
 
     # Split long cues using word timings
     processed_cues = split_long_cues_with_word_timings(
-        merged_cues, max_line_length=42, max_lines=2
+        merged_cues, max_line_length=35, max_lines=2
     )
 
     srt_index = 1
