@@ -673,6 +673,7 @@ def split_long_cues_with_word_timings(
     min_duration=5.0 / 6.0,
     max_duration=MAX_DURATION,
     desired_wps=DESIRED_WPS,
+    max_gap_duration=1.5,  # Maximum acceptable time gap between chunks for merging
 ) -> List[Cue]:
     new_cues: List[Cue] = []
     for cue in cues:
@@ -773,38 +774,52 @@ def split_long_cues_with_word_timings(
                 if i + 1 < len(chunks):
                     # Merge with next chunk
                     next_chunk = chunks[i + 1]
-                    merged_words = chunk_words + next_chunk["words"]
-                    merged_timings = chunk_word_timings + next_chunk["timings"]
-                    merged_text = " ".join(merged_words)
-                    merged_formatted_text = split_subtitle(
-                        merged_text, max_chars=max_line_length
+                    next_chunk_start_time = next_chunk["timings"][0].get(
+                        "start", cue["end"]
                     )
-                    num_lines = len(merged_formatted_text.split("\n"))
+                    time_gap = next_chunk_start_time - end_time
 
-                    # Check if merged cue respects formatting constraints
-                    if num_lines <= max_lines + 1:  # Allow one extra line for merging
-                        # Update the next chunk with merged data
-                        chunks[i + 1] = {
-                            "words": merged_words,
-                            "timings": merged_timings,
-                        }
-                        continue  # Skip adding current chunk, as it's merged
+                    if time_gap <= max_gap_duration:
+                        merged_words = chunk_words + next_chunk["words"]
+                        merged_timings = chunk_word_timings + next_chunk["timings"]
+                        merged_text = " ".join(merged_words)
+                        merged_formatted_text = split_subtitle(
+                            merged_text, max_chars=max_line_length
+                        )
+                        num_lines = len(merged_formatted_text.split("\n"))
+
+                        # Check if merged cue respects formatting constraints
+                        if (
+                            num_lines <= max_lines + 1
+                        ):  # Allow one extra line for merging
+                            # Update the next chunk with merged data
+                            chunks[i + 1] = {
+                                "words": merged_words,
+                                "timings": merged_timings,
+                            }
+                            continue  # Skip adding current chunk, as it's merged
                 # Else, try to merge with the previous chunk
                 elif new_cues:
                     prev_cue = new_cues[-1]
-                    merged_text = prev_cue["text"] + " " + chunk_text
-                    merged_formatted_text = split_subtitle(
-                        merged_text, max_chars=max_line_length
-                    )
-                    num_lines = len(merged_formatted_text.split("\n"))
-                    if num_lines <= max_lines + 1:  # Allow one extra line for merging
-                        # Update previous cue with merged data
-                        prev_cue["text"] = merged_text
-                        prev_cue["end"] = end_time
-                        # Handle 'word_data'
-                        prev_word_data = prev_cue.get("word_data", [])
-                        prev_cue["word_data"] = prev_word_data + chunk_word_timings
-                        continue
+                    prev_cue_end_time = prev_cue["end"]
+                    time_gap = start_time - prev_cue_end_time
+
+                    if time_gap <= max_gap_duration:
+                        merged_text = prev_cue["text"] + " " + chunk_text
+                        merged_formatted_text = split_subtitle(
+                            merged_text, max_chars=max_line_length
+                        )
+                        num_lines = len(merged_formatted_text.split("\n"))
+                        if (
+                            num_lines <= max_lines + 1
+                        ):  # Allow one extra line for merging
+                            # Update previous cue with merged data
+                            prev_cue["text"] = merged_text
+                            prev_cue["end"] = end_time
+                            # Handle 'word_data'
+                            prev_word_data = prev_cue.get("word_data", [])
+                            prev_cue["word_data"] = prev_word_data + chunk_word_timings
+                            continue
                 # If cannot merge, proceed with current chunk
                 print(f"Cue '{chunk_text}' has short duration ({duration}s)")
 
