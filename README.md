@@ -1,4 +1,6 @@
-# whisperX on Replicate
+# whisperx-subtitles-replicate
+
+> Generates synchronized, readable SRT subtitles from transcribed audio with WhisperX (faster-whisper-large-v3)
 
 This a fork of:
 
