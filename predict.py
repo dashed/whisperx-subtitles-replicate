@@ -428,7 +428,11 @@ def diarize(audio, result, debug, huggingface_access_token, min_speakers, max_sp
 
 
 def generate_srt(segments, language) -> str:
-    segmenter = pysbd.Segmenter(language=language, clean=False)
+    segmenter = None
+    try:
+        segmenter = pysbd.Segmenter(language=language, clean=False)
+    except Exception as e:
+        print(f"Failed to initialize segmenter for language {language}: {e}")
 
     output_srt = ""
 
@@ -543,9 +547,15 @@ def split_sentence_heuristically(
     return final_parts
 
 
-def split_at_sentence_end(segmenter, text: str, word_data: List[Word]) -> List[Cue]:
-    # sentences = re.split(r"(?<=[.!?])\s+", text)
-    sentences = segmenter.segment(text)
+def split_at_sentence_end(
+    segmenter: Optional[pysbd.Segmenter], text: str, word_data: List[Word]
+) -> List[Cue]:
+
+    sentences = []
+    if segmenter is not None:
+        sentences = segmenter.segment(text)
+    else:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
 
     result: List[Cue] = []
     current_word_index = 0
