@@ -53,21 +53,20 @@ def test_format_timestamp_basic(seconds, expected):
 
 
 def test_format_timestamp_sub_millisecond_rounds_to_nearest():
-    # 0.0005 rounds up to 1 ms via the %06.3f format.
-    assert format_timestamp(0.0005) == "00:00:00,001"
+    # Sub-millisecond values round to the nearest millisecond (0.0005s -> 0ms).
+    assert format_timestamp(0.0005) == "00:00:00,000"
 
 
-def test_format_timestamp_near_minute_boundary_rounds_to_60_seconds():
-    # NOTE: surprising behavior. 59.9999s rounds the seconds field up to
-    # "60.000" instead of rolling over to the next minute, producing an
-    # invalid SRT timestamp (the seconds field should never read 60).
-    assert format_timestamp(59.9999) == "00:00:60,000"
+def test_format_timestamp_rolls_over_at_minute_boundary():
+    # 59.9999s rounds up and rolls into the next minute instead of producing an
+    # invalid "00:00:60,000" (a seconds field must never read 60).
+    assert format_timestamp(59.9999) == "00:01:00,000"
 
 
-def test_format_timestamp_negative_is_malformed():
-    # NOTE: negative input is not guarded against and yields a malformed,
-    # non-SRT timestamp. Documented here, not endorsed.
-    assert format_timestamp(-1.0) == "-1:59:59,000"
+def test_format_timestamp_negative_clamped_to_zero():
+    # Negative input is guarded and clamped to zero rather than producing a
+    # malformed, non-SRT timestamp.
+    assert format_timestamp(-1.0) == "00:00:00,000"
 
 
 def test_format_timestamp_uses_comma_decimal_separator():
@@ -122,13 +121,11 @@ def test_split_subtitle_boundary_lengths(text, max_chars, expected):
     assert split_subtitle(text, max_chars=max_chars) == expected
 
 
-def test_split_subtitle_single_word_longer_than_max_emits_leading_blank_line():
-    # NOTE: off-by-one / surprising behavior. When the very first word already
-    # exceeds max_chars, the greedy loop appends an empty current_line before
-    # placing the oversize word, producing a spurious leading blank line.
+def test_split_subtitle_single_word_longer_than_max_no_leading_blank():
+    # An oversize first word gets its own line with no spurious leading blank.
     result = split_subtitle("supercalifragilistic", max_chars=5)
-    assert result == "\nsupercalifragilistic"
-    assert result.split("\n") == ["", "supercalifragilistic"]
+    assert result == "supercalifragilistic"
+    assert result.split("\n") == ["supercalifragilistic"]
 
 
 def test_split_subtitle_oversize_word_in_middle_does_not_blank_line():
@@ -202,8 +199,8 @@ def test_ssh_splits_on_conjunctions_when_overflowing():
         "I went to the store and I bought some milk because we needed it "
         "for breakfast tomorrow morning before work"
     )
-    # NOTE: the split happens BEFORE conjunctions (and/because/before),
-    # producing clauses that may individually still exceed max_lines.
+    # The split happens BEFORE conjunctions (and/because/before); here each
+    # resulting clause already fits within max_lines so none is split further.
     assert split_sentence_heuristically(sentence, 42, 2) == [
         "I went to the store",
         "and I bought some milk",
@@ -233,45 +230,47 @@ def test_ssh_comma_stays_attached_to_preceding_part():
     assert result[0] == "aaaa bbbb cccc dddd,"
 
 
-def test_ssh_overlong_unsplittable_part_is_halved_once():
-    # No commas/semicolons/conjunctions -> a single "part" that overflows.
-    # It is halved at the word midpoint into exactly two parts.
+def test_ssh_overlong_part_split_recursively_to_fit():
+    # No commas/semicolons/conjunctions -> a single over-long "part" that is
+    # split recursively at word midpoints until every piece fits max_lines.
     sentence = (
         "alpha beta gamma delta epsilon zeta eta theta iota kappa "
         "lambda mu nu xi omicron"
     )
-    words = sentence.split()
-    mid = len(words) // 2
-    assert split_sentence_heuristically(sentence, 20, 2) == [
-        " ".join(words[:mid]),
-        " ".join(words[mid:]),
+    result = split_sentence_heuristically(sentence, 20, 2)
+    assert result == [
+        "alpha beta gamma",
+        "delta epsilon zeta eta",
+        "theta iota kappa lambda",
+        "mu nu xi omicron",
     ]
+    # Every returned part fits within max_lines=2, and words are preserved.
+    assert all(len(split_subtitle(p, max_chars=20).split("\n")) <= 2 for p in result)
+    assert " ".join(result).split() == sentence.split()
 
 
-def test_ssh_halving_is_only_one_level_deep():
-    # NOTE: documents a limitation. The "further split" step only halves an
-    # over-long part ONCE; the resulting halves are NOT re-checked, so a
-    # returned part can still exceed max_lines. Here the conjunction split
-    # yields parts that are short enough to NOT trigger halving, and one of
-    # them ("clause with absolutely no punctuation") still wraps to >2 lines.
+def test_ssh_splits_recursively_until_parts_fit():
+    # The "further split" step now recurses, so no returned part exceeds
+    # max_lines (previously the halving was only one level deep and a part
+    # could still overflow).
     sentence = (
         "this is a very long clause with absolutely no punctuation or "
         "conjunctions at all here that keeps going and going forever"
     )
     result = split_sentence_heuristically(sentence, 20, 2)
-    # Real, observed output (pinned):
     assert result == [
         "this is a very long",
-        "clause with absolutely no punctuation",
+        "clause with",
+        "absolutely no punctuation",
         "or conjunctions at all",
         "here that keeps going",
         "and going forever",
     ]
-    # And at least one part still overflows max_lines=2 at max_chars=20.
+    # No part overflows max_lines=2 at max_chars=20.
     overflowing = [
         p for p in result if len(split_subtitle(p, max_chars=20).split("\n")) > 2
     ]
-    assert overflowing == ["clause with absolutely no punctuation"]
+    assert overflowing == []
 
 
 def test_ssh_max_lines_one_forces_a_split():
