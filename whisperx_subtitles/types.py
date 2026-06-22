@@ -1,6 +1,6 @@
 """Shared TypedDict definitions for transcription segments and subtitle cues."""
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 
 class Word(TypedDict):
@@ -8,6 +8,7 @@ class Word(TypedDict):
     word: str
     score: float | None
     start: float | None
+    speaker: NotRequired[str]  # set by diarization (whisperx.assign_word_speakers)
 
 
 class Segment(TypedDict):
@@ -15,6 +16,7 @@ class Segment(TypedDict):
     text: str
     start: float
     words: list[Word]
+    speaker: NotRequired[str]
 
 
 class Cue(TypedDict):
@@ -22,6 +24,7 @@ class Cue(TypedDict):
     start: float
     end: float
     word_data: list[Word] | None
+    speaker: NotRequired[str | None]
 
 
 Segments = list[Segment]
