@@ -102,6 +102,13 @@ Model used is for transcription is large-v3 from faster-whisper.
 
 For more information about WhisperX, including implementation details, see the [WhisperX github repo](https://github.com/m-bain/whisperX).
 
+## Diarization
+
+When `diarization` is enabled, WhisperX uses pyannote's
+[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
+pipeline. You must accept that model's user agreement on Hugging Face and pass a
+read token via `huggingface_access_token`.
+
 # Citation
 
 ```

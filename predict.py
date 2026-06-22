@@ -3,7 +3,6 @@ import gc
 import math
 import os
 import re
-import shutil
 import tempfile
 import time
 from typing import Any, TypedDict
@@ -13,7 +12,9 @@ import pysbd
 import torch
 import whisperx
 from cog import BaseModel, BasePredictor, Input, Path
+from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 from whisperx.audio import N_SAMPLES, log_mel_spectrogram
+from whisperx.diarize import DiarizationPipeline
 
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
 device = "cuda"
@@ -54,20 +55,6 @@ class Output(BaseModel):
 
 
 class Predictor(BasePredictor):
-    def setup(self):
-        source_folder = "./models/vad"
-        destination_folder = "../root/.cache/torch"
-        file_name = "whisperx-vad-segmentation.bin"
-
-        os.makedirs(destination_folder, exist_ok=True)
-
-        source_file_path = os.path.join(source_folder, file_name)
-        if os.path.exists(source_file_path):
-            destination_file_path = os.path.join(destination_folder, file_name)
-
-            if not os.path.exists(destination_file_path):
-                shutil.copy(source_file_path, destination_folder)
-
     def predict(
         self,
         audio_file: Path = Input(description="Audio file"),
@@ -212,8 +199,8 @@ class Predictor(BasePredictor):
 
             if align_output:
                 if (
-                    detected_language in whisperx.alignment.DEFAULT_ALIGN_MODELS_TORCH
-                    or detected_language in whisperx.alignment.DEFAULT_ALIGN_MODELS_HF
+                    detected_language in DEFAULT_ALIGN_MODELS_TORCH
+                    or detected_language in DEFAULT_ALIGN_MODELS_HF
                 ):
                     result = align(audio, result, debug)
                 else:
@@ -409,9 +396,7 @@ def align(audio, result, debug):
 def diarize(audio, result, debug, huggingface_access_token, min_speakers, max_speakers):
     start_time = time.time_ns() / 1e6
 
-    diarize_model = whisperx.DiarizationPipeline(
-        use_auth_token=huggingface_access_token, device=device
-    )
+    diarize_model = DiarizationPipeline(token=huggingface_access_token, device=device)
     diarize_segments = diarize_model(
         audio, min_speakers=min_speakers, max_speakers=max_speakers
     )
