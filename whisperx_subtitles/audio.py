@@ -1,19 +1,27 @@
 """Audio probing/segmentation helpers (ffmpeg) and pure segment-timing math."""
 
+import logging
 import tempfile
 from pathlib import Path
 
 import ffmpeg
 
+logger = logging.getLogger(__name__)
+
 
 def get_audio_duration(file_path):
     probe = ffmpeg.probe(file_path)
     stream = next(
-        (stream for stream in probe["streams"] if stream["codec_type"] == "audio"), None
+        (s for s in probe["streams"] if s["codec_type"] == "audio"),
+        None,
     )
     if stream is None:
         raise ValueError(f"No audio stream found in {file_path}")
-    return float(stream["duration"]) * 1000
+    # Some containers omit a per-stream duration; fall back to the format-level one.
+    duration = stream.get("duration") or probe.get("format", {}).get("duration")
+    if duration is None:
+        raise ValueError(f"Could not determine audio duration for {file_path}")
+    return float(duration) * 1000
 
 
 def extract_audio_segment(input_file_path, start_time_ms, duration_ms):
@@ -27,7 +35,7 @@ def extract_audio_segment(input_file_path, start_time_ms, duration_ms):
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
         temp_file_path = Path(temp_file.name)
 
-        print(f"Extracting from {input_file_path.name} to {temp_file.name}")
+        logger.debug("Extracting from %s to %s", input_file_path.name, temp_file.name)
 
         try:
             (
@@ -36,14 +44,14 @@ def extract_audio_segment(input_file_path, start_time_ms, duration_ms):
                 .run(capture_stdout=True, capture_stderr=True, overwrite_output=True)
             )
         except ffmpeg.Error as e:
-            print("ffmpeg error occurred: ", e.stderr.decode("utf-8"))
-            raise e
+            logger.error("ffmpeg error: %s", e.stderr.decode("utf-8"))
+            raise
 
     return temp_file_path
 
 
 def distribute_segments_equally(total_duration, segments_duration, iterations):
-    available_duration = total_duration - segments_duration
+    available_duration = max(total_duration - segments_duration, 0)
 
     if iterations > 1:
         spacing = available_duration // (iterations - 1)
@@ -53,6 +61,6 @@ def distribute_segments_equally(total_duration, segments_duration, iterations):
     start_times = [i * spacing for i in range(iterations)]
 
     if iterations > 1:
-        start_times[-1] = total_duration - segments_duration
+        start_times[-1] = available_duration
 
     return start_times

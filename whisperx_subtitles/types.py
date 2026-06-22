@@ -25,6 +25,3 @@ class Cue(TypedDict):
     end: float
     word_data: list[Word] | None
     speaker: NotRequired[str | None]
-
-
-Segments = list[Segment]

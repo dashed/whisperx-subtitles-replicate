@@ -1,14 +1,13 @@
-"""Characterization tests for the subtitle *formatting primitives*.
+"""Property / correctness tests for the subtitle *formatting primitives*.
 
-These tests document what the code in ``whisperx_subtitles.subtitles`` ACTUALLY
-does today (warts and all), not what it ideally should do. Several assertions
-deliberately pin surprising/buggy behavior so that a future refactor will make
-the intent of any change explicit. Such cases are flagged with ``# NOTE:``.
+Unlike the old characterization suite, these tests assert what the rewritten
+engine in ``whisperx_subtitles.subtitles`` is *meant* to do: produce valid SRT
+timestamps, balanced max-2-line wraps, and recursive sentence splits that keep
+every piece within the line budget while preserving all words.
 
 Covered functions:
     - format_timestamp
     - split_subtitle
-    - extract_words
     - split_sentence_heuristically
 
 Run with:
@@ -17,10 +16,12 @@ Run with:
 
 from __future__ import annotations
 
+from collections import Counter
+
 import pytest
 
+from whisperx_subtitles.config import MAX_LINE_LENGTH, MAX_LINES
 from whisperx_subtitles.subtitles import (
-    extract_words,
     format_timestamp,
     split_sentence_heuristically,
     split_subtitle,
@@ -31,8 +32,10 @@ from whisperx_subtitles.subtitles import (
 # ---------------------------------------------------------------------------
 
 
-def test_format_timestamp_none_returns_zero():
-    assert format_timestamp(None) == "00:00:00,000"
+@pytest.mark.parametrize("bad", [None, -0.001, -1.0, -3600.0])
+def test_format_timestamp_none_or_negative_is_zero(bad):
+    # Guard clause: missing or negative input never yields a malformed timestamp.
+    assert format_timestamp(bad) == "00:00:00,000"
 
 
 @pytest.mark.parametrize(
@@ -40,242 +43,302 @@ def test_format_timestamp_none_returns_zero():
     [
         (0, "00:00:00,000"),
         (0.0, "00:00:00,000"),
+        (0.001, "00:00:00,001"),
         (1.5, "00:00:01,500"),
         (59.999, "00:00:59,999"),
         (3600, "01:00:00,000"),
-        (3661.5, "01:01:01,500"),  # hours rollover
+        (3661.5, "01:01:01,500"),
         (7322.123, "02:02:02,123"),
-        (0.001, "00:00:00,001"),
     ],
 )
-def test_format_timestamp_basic(seconds, expected):
+def test_format_timestamp_hms_format(seconds, expected):
     assert format_timestamp(seconds) == expected
-
-
-def test_format_timestamp_sub_millisecond_rounds_to_nearest():
-    # Sub-millisecond values round to the nearest millisecond (0.0005s -> 0ms).
-    assert format_timestamp(0.0005) == "00:00:00,000"
-
-
-def test_format_timestamp_rolls_over_at_minute_boundary():
-    # 59.9999s rounds up and rolls into the next minute instead of producing an
-    # invalid "00:00:60,000" (a seconds field must never read 60).
-    assert format_timestamp(59.9999) == "00:01:00,000"
-
-
-def test_format_timestamp_negative_clamped_to_zero():
-    # Negative input is guarded and clamped to zero rather than producing a
-    # malformed, non-SRT timestamp.
-    assert format_timestamp(-1.0) == "00:00:00,000"
 
 
 def test_format_timestamp_uses_comma_decimal_separator():
     # SRT uses a comma (not a period) before the milliseconds.
-    assert "," in format_timestamp(1.5)
-    assert "." not in format_timestamp(1.5)
-
-
-# ---------------------------------------------------------------------------
-# split_subtitle
-# ---------------------------------------------------------------------------
-
-
-def test_split_subtitle_empty_string():
-    assert split_subtitle("") == ""
-
-
-def test_split_subtitle_whitespace_only():
-    # str.split() drops all whitespace -> no words -> empty output.
-    assert split_subtitle("   ") == ""
-
-
-def test_split_subtitle_single_short_word():
-    assert split_subtitle("hello") == "hello"
-
-
-def test_split_subtitle_collapses_multiple_spaces():
-    # Internal runs of whitespace are collapsed to single spaces because
-    # the text is rebuilt via " ".join(words).
-    assert split_subtitle("a  b   c") == "a b c"
-
-
-def test_split_subtitle_greedy_wrap_default_max():
-    # Exactly fills lines greedily up to max_chars (default 42).
-    text = "word " * 10  # ten words of length 4
-    assert split_subtitle(text, max_chars=10) == (
-        "word word\nword word\nword word\nword word\nword word"
-    )
+    ts = format_timestamp(1.5)
+    assert "," in ts and "." not in ts
 
 
 @pytest.mark.parametrize(
-    ("text", "max_chars", "expected"),
+    ("seconds", "expected"),
     [
-        # "aa bb" == 5 chars fits exactly at max_chars=5, "cc" wraps.
-        ("aa bb cc", 5, "aa bb\ncc"),
-        # At max_chars=4, "aa bb" (5) overflows so every word is its own line.
-        ("aa bb cc", 4, "aa\nbb\ncc"),
-        ("a b c d e f", 3, "a b\nc d\ne f"),
+        (59.9999, "00:01:00,000"),  # rolls into next minute, not 00:00:60,000
+        (0.0005, "00:00:00,000"),  # sub-ms rounds to nearest ms (down here)
+        (0.0006, "00:00:00,001"),  # sub-ms rounds to nearest ms (up here)
+        (3599.9999, "01:00:00,000"),  # rolls minutes -> hours
     ],
 )
-def test_split_subtitle_boundary_lengths(text, max_chars, expected):
-    assert split_subtitle(text, max_chars=max_chars) == expected
+def test_format_timestamp_integer_ms_rounding_rolls_over(seconds, expected):
+    assert format_timestamp(seconds) == expected
 
 
-def test_split_subtitle_single_word_longer_than_max_no_leading_blank():
-    # An oversize first word gets its own line with no spurious leading blank.
-    result = split_subtitle("supercalifragilistic", max_chars=5)
-    assert result == "supercalifragilistic"
-    assert result.split("\n") == ["supercalifragilistic"]
+@pytest.mark.parametrize(
+    "seconds",
+    [0.0, 1.0, 59.9999, 60.0, 119.9999, 3599.9999, 3600.0, 7199.9999],
+)
+def test_format_timestamp_seconds_field_never_sixty(seconds):
+    # The seconds field of a valid SRT timestamp must be in 00..59.
+    ts = format_timestamp(seconds)
+    secs = int(ts[6:8])
+    assert 0 <= secs <= 59
 
 
-def test_split_subtitle_oversize_word_in_middle_does_not_blank_line():
-    # When the oversize word is not first, it simply gets its own line; no
-    # spurious blank line because current_line was non-empty at the break.
-    result = split_subtitle("hi superlongword bye", max_chars=5)
-    assert result == "hi\nsuperlongword\nbye"
-
-
-# ---------------------------------------------------------------------------
-# extract_words
-# ---------------------------------------------------------------------------
-
-
-def test_extract_words_returns_set_lowercased():
-    assert extract_words("Hello, world! Hello.") == {"hello", "world"}
-
-
-def test_extract_words_empty():
-    assert extract_words("") == set()
-
-
-def test_extract_words_keeps_apostrophes():
-    # The \w+ class plus an explicit apostrophe keeps contractions intact.
-    assert extract_words("it's a test's") == {"it's", "a", "test's"}
-
-
-def test_extract_words_underscores_and_digits_are_word_chars():
-    # NOTE: \w matches underscores and digits, so "a_b" and "123" are tokens,
-    # while the hyphen in "c-d" is a separator.
-    assert extract_words("a_b c-d 123") == {"a_b", "c", "d", "123"}
-
-
-def test_extract_words_unicode_letters():
-    assert extract_words("CAFÉ café") == {"café"}
-
-
-def test_extract_words_deduplicates():
-    assert extract_words("the the THE The") == {"the"}
+@pytest.mark.parametrize(
+    "seconds",
+    [0.0, 1.5, 59.999, 3661.5, 7322.123],
+)
+def test_format_timestamp_well_formed_shape(seconds):
+    ts = format_timestamp(seconds)
+    assert len(ts) == len("00:00:00,000")
+    hh, mm, rest = ts.split(":")
+    ss, ms = rest.split(",")
+    assert len(hh) == 2 and len(mm) == 2 and len(ss) == 2 and len(ms) == 3
+    assert 0 <= int(mm) <= 59
+    assert 0 <= int(ss) <= 59
 
 
 # ---------------------------------------------------------------------------
-# split_sentence_heuristically
+# split_subtitle  (balanced, max-2-line wrapping)
 # ---------------------------------------------------------------------------
 
 
-def test_ssh_short_sentence_returned_stripped_as_single_element():
-    assert split_sentence_heuristically("short sentence", 42, 2) == ["short sentence"]
+def _lines(result: str) -> list[str]:
+    return result.split("\n") if result else []
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\t\n  "])
+def test_split_subtitle_empty_or_whitespace_is_empty(empty):
+    assert split_subtitle(empty) == ""
+
+
+def test_split_subtitle_single_short_text_stays_one_line():
+    assert split_subtitle("hello world") == "hello world"
+    assert _lines(split_subtitle("hello world")) == ["hello world"]
+
+
+def test_split_subtitle_collapses_internal_whitespace():
+    assert split_subtitle("a  b   c") == "a b c"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the quick brown fox jumps over the lazy dog",
+        "one two three four five six seven eight nine ten",
+        "a b c d e f g h i j k l m n o p q r s t u v",
+        "short",
+        "supercalifragilistic",  # oversize single word
+        "hi superlongwordthatexceeds bye",  # oversize word in the middle
+    ],
+)
+@pytest.mark.parametrize("max_chars", [5, 10, 20, 42])
+def test_split_subtitle_every_line_within_budget_when_possible(text, max_chars):
+    # Every produced line must be <= max_chars, EXCEPT a single word that is
+    # itself longer than max_chars (which has nowhere else to go).
+    for line in _lines(split_subtitle(text, max_chars=max_chars)):
+        if " " in line:
+            assert len(line) <= max_chars
+        else:
+            # a lone word may legitimately exceed max_chars
+            assert line  # never an empty line
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the quick brown fox jumps over the lazy dog",
+        "supercalifragilistic and tiny",
+        "supercalifragilistic",
+        "a b c d e f g",
+    ],
+)
+@pytest.mark.parametrize("max_chars", [3, 5, 10, 42])
+def test_split_subtitle_no_empty_or_leading_blank_line(text, max_chars):
+    # Even when the first word is oversize, there must be no spurious blank line.
+    result = split_subtitle(text, max_chars=max_chars)
+    assert not result.startswith("\n")
+    assert "" not in _lines(result)
+
+
+def test_split_subtitle_words_preserved_in_order():
+    text = "the quick brown fox jumps over the lazy dog again now"
+    result = split_subtitle(text, max_chars=20)
+    assert result.replace("\n", " ").split() == text.split()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "aaaa bbbb cccc dddd eeee ffff",
+        "alpha beta gamma delta epsilon",
+        "the quick brown fox jumps lazy",
+    ],
+)
+def test_split_subtitle_two_lines_are_balanced(text):
+    # When the text wraps to exactly two lines, the balancer should make the two
+    # line lengths reasonably close. Pick a max_chars that forces two lines but
+    # leaves slack for balancing.
+    max_chars = (len(text) // 2) + 6
+    lines = _lines(split_subtitle(text, max_chars=max_chars))
+    assert len(lines) == 2
+    # Both within budget and reasonably balanced.
+    assert all(len(line) <= max_chars for line in lines)
+    assert abs(len(lines[0]) - len(lines[1])) <= max(len(w) for w in text.split()) + 1
+
+
+def test_split_subtitle_avoids_breaking_after_function_word():
+    # A greedy wrap would strand a short function word at the end of line 1.
+    # The balancer should instead break before it when an alternative exists.
+    text = "I really wanted to go to the beach today"
+    max_chars = 22
+    lines = _lines(split_subtitle(text, max_chars=max_chars))
+    assert len(lines) == 2
+    last_word_line1 = lines[0].split()[-1].lower().strip(",.;:!?")
+    assert last_word_line1 not in {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "of",
+        "to",
+        "in",
+        "on",
+        "at",
+        "for",
+        "with",
+        "as",
+        "by",
+        "is",
+        "are",
+        "was",
+        "were",
+    }
+
+
+def test_split_subtitle_uses_config_default_max():
+    # A line comfortably under MAX_LINE_LENGTH stays a single line by default.
+    text = "a comfortably short caption line"
+    assert len(text) <= MAX_LINE_LENGTH
+    assert split_subtitle(text) == text
+
+
+# ---------------------------------------------------------------------------
+# split_sentence_heuristically  (recursive, punctuation-aware)
+# ---------------------------------------------------------------------------
+
+
+def _fits(part: str, max_chars: int, max_lines: int) -> bool:
+    return len(_lines(split_subtitle(part, max_chars=max_chars))) <= max_lines
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "short sentence",
+        "one two three four five six seven eight",  # wraps to exactly 2 lines
+    ],
+)
+def test_ssh_fitting_sentence_returned_as_single_element(sentence):
+    result = split_sentence_heuristically(sentence, 42, 2)
+    assert result == [sentence.strip()]
 
 
 def test_ssh_strips_surrounding_whitespace_when_it_fits():
     assert split_sentence_heuristically("   short   ", 42, 2) == ["short"]
 
 
-def test_ssh_fits_within_max_lines_is_returned_unsplit():
-    # Wraps to exactly two lines at max_chars=20, so it is within max_lines=2
-    # and returned as a single-element list (unsplit).
-    sentence = "one two three four five six seven eight"
-    assert split_sentence_heuristically(sentence, 20, 2) == [sentence]
-
-
 def test_ssh_oversize_single_word_returned_unsplit():
-    # A lone word can never be split on spaces/punctuation; even though it
-    # technically wraps oddly, it stays a single element.
+    # A lone word cannot be split on spaces/punctuation; it stays one element.
     word = "supercalifragilisticexpialidocious"
     assert split_sentence_heuristically(word, 5, 2) == [word]
 
 
-def test_ssh_splits_on_conjunctions_when_overflowing():
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa "
+        "lambda mu nu xi omicron pi rho sigma tau upsilon",
+        "this is a very long clause with absolutely no punctuation or "
+        "conjunctions at all here that keeps going and going forever",
+        "I went to the store and I bought some milk because we needed it "
+        "for breakfast tomorrow morning before going to work",
+        "First part here is quite long, and the second part there is also "
+        "fairly long indeed, third part everywhere all at once",
+    ],
+)
+@pytest.mark.parametrize(("max_chars", "max_lines"), [(20, 2), (42, 2), (15, 1)])
+def test_ssh_every_returned_part_fits_max_lines(sentence, max_chars, max_lines):
+    # The core invariant: recursion continues until no part exceeds max_lines
+    # (a part consisting of a single oversize word is the only allowed exception).
+    parts = split_sentence_heuristically(sentence, max_chars, max_lines)
+    for part in parts:
+        if not _fits(part, max_chars, max_lines):
+            assert len(part.split()) == 1  # only a lone oversize word may overflow
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa "
+        "lambda mu nu xi omicron",
+        "this is a very long clause with absolutely no punctuation or "
+        "conjunctions at all here that keeps going and going forever",
+        "I went to the store and I bought some milk because we needed it "
+        "for breakfast tomorrow morning before going to work",
+    ],
+)
+@pytest.mark.parametrize(("max_chars", "max_lines"), [(20, 2), (42, 2)])
+def test_ssh_preserves_word_multiset(sentence, max_chars, max_lines):
+    # Splitting only happens at whitespace/clause boundaries, so the multiset of
+    # whitespace-delimited tokens is preserved exactly.
+    parts = split_sentence_heuristically(sentence, max_chars, max_lines)
+    joined = " ".join(parts).split()
+    assert Counter(joined) == Counter(sentence.split())
+
+
+def test_ssh_splits_at_or_after_a_midpoint_comma():
+    # An over-long run with a comma near the middle should split at/after the
+    # comma, with the comma staying attached to the end of the preceding part.
+    sentence = (
+        "aaaa bbbb cccc dddd eeee ffff, gggg hhhh iiii jjjj "
+        "kkkk llll mmmm nnnn oooo pppp"
+    )
+    parts = split_sentence_heuristically(sentence, 20, 2)
+    # Some part ends with the comma (the split was taken at/after it).
+    assert any(part.rstrip().endswith(",") for part in parts)
+    # And the comma-bearing token "ffff," is the last token of its part.
+    comma_part = next(p for p in parts if "ffff," in p)
+    assert comma_part.split()[-1] == "ffff,"
+
+
+def test_ssh_splits_on_clause_conjunctions_when_overflowing():
     sentence = (
         "I went to the store and I bought some milk because we needed it "
         "for breakfast tomorrow morning before work"
     )
-    # The split happens BEFORE conjunctions (and/because/before); here each
-    # resulting clause already fits within max_lines so none is split further.
-    assert split_sentence_heuristically(sentence, 42, 2) == [
-        "I went to the store",
-        "and I bought some milk",
-        "because we needed it for breakfast tomorrow morning",
-        "before work",
-    ]
-
-
-def test_ssh_splits_after_commas_and_semicolons():
-    sentence = (
-        "First part here is quite long, and the second part there is also "
-        "fairly long indeed, third part everywhere"
-    )
-    assert split_sentence_heuristically(sentence, 42, 2) == [
-        "First part here is quite long,",
-        "and the second part there is also fairly long indeed,",
-        "third part everywhere",
-    ]
-
-
-def test_ssh_comma_stays_attached_to_preceding_part():
-    sentence = (
-        "aaaa bbbb cccc dddd, eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo"
-    )
-    result = split_sentence_heuristically(sentence, 30, 2)
-    # The comma is preserved on the first part (split is after it).
-    assert result[0] == "aaaa bbbb cccc dddd,"
-
-
-def test_ssh_overlong_part_split_recursively_to_fit():
-    # No commas/semicolons/conjunctions -> a single over-long "part" that is
-    # split recursively at word midpoints until every piece fits max_lines.
-    sentence = (
-        "alpha beta gamma delta epsilon zeta eta theta iota kappa "
-        "lambda mu nu xi omicron"
-    )
-    result = split_sentence_heuristically(sentence, 20, 2)
-    assert result == [
-        "alpha beta gamma",
-        "delta epsilon zeta eta",
-        "theta iota kappa lambda",
-        "mu nu xi omicron",
-    ]
-    # Every returned part fits within max_lines=2, and words are preserved.
-    assert all(len(split_subtitle(p, max_chars=20).split("\n")) <= 2 for p in result)
-    assert " ".join(result).split() == sentence.split()
-
-
-def test_ssh_splits_recursively_until_parts_fit():
-    # The "further split" step now recurses, so no returned part exceeds
-    # max_lines (previously the halving was only one level deep and a part
-    # could still overflow).
-    sentence = (
-        "this is a very long clause with absolutely no punctuation or "
-        "conjunctions at all here that keeps going and going forever"
-    )
-    result = split_sentence_heuristically(sentence, 20, 2)
-    assert result == [
-        "this is a very long",
-        "clause with",
-        "absolutely no punctuation",
-        "or conjunctions at all",
-        "here that keeps going",
-        "and going forever",
-    ]
-    # No part overflows max_lines=2 at max_chars=20.
-    overflowing = [
-        p for p in result if len(split_subtitle(p, max_chars=20).split("\n")) > 2
-    ]
-    assert overflowing == []
+    parts = split_sentence_heuristically(sentence, 42, 2)
+    # Clauses break before coordinating/subordinating conjunctions, so several
+    # parts begin with one.
+    assert any(p.startswith("and ") for p in parts)
+    assert any(p.startswith("because ") for p in parts)
+    # And every part fits.
+    assert all(_fits(p, 42, 2) for p in parts)
 
 
 def test_ssh_max_lines_one_forces_a_split():
-    # With max_lines=1, a sentence that wraps to 2 lines must be split.
     sentence = "alpha beta gamma delta epsilon zeta eta theta"
-    result = split_sentence_heuristically(sentence, 20, 1)
-    assert len(result) >= 2
-    assert " ".join(result).split() == sentence.split()
+    parts = split_sentence_heuristically(sentence, 20, 1)
+    assert len(parts) >= 2
+    assert Counter(" ".join(parts).split()) == Counter(sentence.split())
+    assert all(_fits(p, 20, 1) for p in parts)
+
+
+def test_ssh_uses_config_defaults_make_sense():
+    # Sanity check the imported config defaults are usable by the splitter.
+    sentence = "word " * 60
+    parts = split_sentence_heuristically(sentence.strip(), MAX_LINE_LENGTH, MAX_LINES)
+    assert all(_fits(p, MAX_LINE_LENGTH, MAX_LINES) for p in parts)

@@ -77,22 +77,32 @@ deliberately free of the GPU stack, so the test suite runs on any machine
 without installing torch/whisperx:
 
 ```sh
-uvx --with pysbd --with ffmpeg-python pytest        # any machine
-uv run pytest                                        # on the Linux image (full env)
+uvx --with pysbd --with ffmpeg-python --with numpy pytest   # any machine
+uv run pytest                                                # on the Linux image (full env)
 ```
 
 ## Project layout
 
 ```
-predict.py                     # Cog entry point: Predictor + Output (thin glue)
+predict.py                     # Cog entry point: Runner (run/setup) + Output (thin glue)
 whisperx_subtitles/
-  config.py                    # runtime constants (compute_type, device, model path, WPS)
+  config.py                    # runtime + subtitle-formatting constants (line length, CPS, durations)
   types.py                     # Word / Segment / Cue TypedDicts
-  subtitles.py                 # pure subtitle logic (sentence split, cue merge/split, SRT)
+  subtitles.py                 # pure subtitle logic (split, merge, timing normalization, SRT)
   audio.py                     # ffmpeg probing + pure segment-timing math
   transcription.py             # whisperx glue: language detection, alignment, diarization
-tests/                         # pytest suite for the pure modules
+tests/                         # pytest suite for the pure modules + mocked pipeline
 ```
+
+## Subtitle formatting
+
+Readability follows EBU-TT / Netflix-style guidelines, all configurable as model
+inputs (`max_line_length`, `max_lines`, `max_cps`, `min_duration`, `max_duration`;
+defaults in `config.py`): max characters per line, max 2 lines, a
+characters-per-second reading-speed ceiling, and min/max on-screen duration. The
+`normalize_cues` pass guarantees cues are ordered and non-overlapping and don't
+linger far past the spoken audio. When `diarization` is enabled, each cue is
+prefixed with its `[SPEAKER_xx]` label.
 
 ## Download models
 

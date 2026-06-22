@@ -1,6 +1,7 @@
 """WhisperX-backed transcription helpers: language detection, alignment, diarization."""
 
 import gc
+import logging
 import time
 
 import torch
@@ -9,54 +10,45 @@ from whisperx.audio import N_SAMPLES, log_mel_spectrogram
 from whisperx.diarize import DiarizationPipeline
 
 from .audio import extract_audio_segment
-from .config import compute_type, device, whisper_arch
+from .config import device
+
+logger = logging.getLogger(__name__)
 
 
 def detect_language(
+    whisper_model,
     full_audio_file_path,
     segments_starts,
     language_detection_min_prob,
     language_detection_max_tries,
-    asr_options,
-    vad_options,
     iteration=1,
 ):
-    model = whisperx.load_model(
-        whisper_arch,
-        device,
-        compute_type=compute_type,
-        asr_options=asr_options,
-        vad_options=vad_options,
-    )
-
+    """Detect the spoken language on successive 30s windows, keeping the most
+    probable result. Reuses the already-loaded WhisperModel (no per-call reload)."""
     start_ms = segments_starts[iteration - 1]
-
     audio_segment_file_path = extract_audio_segment(
         full_audio_file_path, start_ms, 30000
     )
-
     audio = whisperx.load_audio(audio_segment_file_path)
 
-    model_n_mels = model.model.feat_kwargs.get("feature_size")
+    model_n_mels = whisper_model.feat_kwargs.get("feature_size")
     segment = log_mel_spectrogram(
         audio[:N_SAMPLES],
         n_mels=model_n_mels if model_n_mels is not None else 80,
         padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0],
     )
-    encoder_output = model.model.encode(segment)
-    results = model.model.model.detect_language(encoder_output)
+    encoder_output = whisper_model.encode(segment)
+    results = whisper_model.model.detect_language(encoder_output)
     language_token, language_probability = results[0][0]
     language = language_token[2:-2]
 
-    print(
-        f"Iteration {iteration} - Detected language: {language} ({language_probability:.2f})"
+    logger.info(
+        "Iteration %d - detected language: %s (%.2f)",
+        iteration,
+        language,
+        language_probability,
     )
-
     audio_segment_file_path.unlink()
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    del model
 
     detected_language = {
         "language": language,
@@ -70,31 +62,34 @@ def detect_language(
     ):
         return detected_language
 
-    next_iteration_detected_language = detect_language(
+    next_detected = detect_language(
+        whisper_model,
         full_audio_file_path,
         segments_starts,
         language_detection_min_prob,
         language_detection_max_tries,
-        asr_options,
-        vad_options,
         iteration + 1,
     )
-
-    if (
-        next_iteration_detected_language["probability"]
-        > detected_language["probability"]
-    ):
-        return next_iteration_detected_language
-
+    if next_detected["probability"] > detected_language["probability"]:
+        return next_detected
     return detected_language
 
 
-def align(audio, result, debug):
+def align(audio, result, debug, align_cache=None):
+    """Align transcription to word-level timestamps. If align_cache (a dict) is
+    given, the per-language alignment model is loaded once and reused."""
     start_time = time.time_ns() / 1e6
+    language = result["language"]
 
-    model_a, metadata = whisperx.load_align_model(
-        language_code=result["language"], device=device
-    )
+    if align_cache is not None and language in align_cache:
+        model_a, metadata = align_cache[language]
+    else:
+        model_a, metadata = whisperx.load_align_model(
+            language_code=language, device=device
+        )
+        if align_cache is not None:
+            align_cache[language] = (model_a, metadata)
+
     result = whisperx.align(
         result["segments"],
         model_a,
@@ -105,12 +100,12 @@ def align(audio, result, debug):
     )
 
     if debug:
-        elapsed_time = time.time_ns() / 1e6 - start_time
-        print(f"Duration to align output: {elapsed_time:.2f} ms")
+        logger.info("Alignment took %.2f ms", time.time_ns() / 1e6 - start_time)
 
-    gc.collect()
-    torch.cuda.empty_cache()
-    del model_a
+    if align_cache is None:
+        del model_a
+        gc.collect()
+        torch.cuda.empty_cache()
 
     return result
 
@@ -122,15 +117,13 @@ def diarize(audio, result, debug, huggingface_access_token, min_speakers, max_sp
     diarize_segments = diarize_model(
         audio, min_speakers=min_speakers, max_speakers=max_speakers
     )
-
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
     if debug:
-        elapsed_time = time.time_ns() / 1e6 - start_time
-        print(f"Duration to diarize segments: {elapsed_time:.2f} ms")
+        logger.info("Diarization took %.2f ms", time.time_ns() / 1e6 - start_time)
 
+    del diarize_model
     gc.collect()
     torch.cuda.empty_cache()
-    del diarize_model
 
     return result

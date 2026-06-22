@@ -1,30 +1,49 @@
-import copy
 import gc
+import logging
 import math
 import os
-import time
-from typing import Any
 
 import torch
 import whisperx
-from cog import BaseModel, BasePredictor, Input, Path
+from cog import BaseModel, BaseRunner, Input, Path
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 
 from whisperx_subtitles.audio import distribute_segments_equally, get_audio_duration
-from whisperx_subtitles.config import compute_type, device, whisper_arch
+from whisperx_subtitles.config import (
+    MAX_CPS,
+    MAX_DURATION,
+    MAX_LINE_LENGTH,
+    MAX_LINES,
+    MIN_DURATION,
+    compute_type,
+    device,
+    whisper_arch,
+)
 from whisperx_subtitles.subtitles import generate_srt
 from whisperx_subtitles.transcription import align, detect_language, diarize
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class Output(BaseModel):
-    segments: Any
     detected_language: str
     srt_output: str
     srt_file: Path
 
 
-class Predictor(BasePredictor):
-    def predict(
+class Runner(BaseRunner):
+    def setup(self):
+        # Load the heavy WhisperModel once at boot; each request builds a cheap
+        # pipeline wrapper around it (whisperx.load_model(..., model=...)) so the
+        # ~1.5GB model is not reloaded per prediction. Alignment models are
+        # cached lazily per language.
+        self.whisper_model = whisperx.load_model(
+            whisper_arch, device, compute_type=compute_type
+        ).model
+        self.align_models: dict = {}
+
+    def run(
         self,
         audio_file: Path = Input(description="Audio file"),
         language: str | None = Input(
@@ -74,17 +93,40 @@ class Predictor(BasePredictor):
             description="Maximum number of speakers if diarization is activated (leave blank if unknown)",
             default=None,
         ),
+        max_line_length: int = Input(
+            description="Maximum number of characters per subtitle line",
+            default=MAX_LINE_LENGTH,
+        ),
+        max_lines: int = Input(
+            description="Maximum number of lines per subtitle cue", default=MAX_LINES
+        ),
+        max_cps: float = Input(
+            description="Maximum reading speed in characters per second",
+            default=MAX_CPS,
+        ),
+        min_duration: float = Input(
+            description="Minimum seconds a subtitle stays on screen",
+            default=MIN_DURATION,
+        ),
+        max_duration: float = Input(
+            description="Maximum seconds a subtitle stays on screen",
+            default=MAX_DURATION,
+        ),
         debug: bool = Input(
             description="Print out compute/inference times and memory usage information",
             default=False,
         ),
     ) -> Output:
+        if diarization and not huggingface_access_token:
+            raise ValueError(
+                "huggingface_access_token is required when diarization is enabled."
+            )
+
         with torch.inference_mode():
             asr_options = {
                 "temperatures": [temperature],
                 "initial_prompt": initial_prompt,
             }
-
             vad_options = {"vad_onset": vad_onset, "vad_offset": vad_offset}
 
             audio_duration = get_audio_duration(audio_file)
@@ -95,43 +137,34 @@ class Predictor(BasePredictor):
                 and audio_duration > 30000
             ):
                 segments_duration_ms = 30000
-
                 language_detection_max_tries = min(
                     language_detection_max_tries,
                     math.floor(audio_duration / segments_duration_ms),
                 )
-
                 segments_starts = distribute_segments_equally(
                     audio_duration, segments_duration_ms, language_detection_max_tries
                 )
-
-                print(
-                    "Detecting languages on segments starting at "
-                    + ", ".join(map(str, segments_starts))
+                logger.info(
+                    "Detecting language on segments starting at %s",
+                    ", ".join(map(str, segments_starts)),
                 )
-
-                detected_language_details = detect_language(
+                details = detect_language(
+                    self.whisper_model,
                     audio_file,
                     segments_starts,
                     language_detection_min_prob,
                     language_detection_max_tries,
-                    asr_options,
-                    vad_options,
                 )
-
-                detected_language_code = detected_language_details["language"]
-                detected_language_prob = detected_language_details["probability"]
-                detected_language_iterations = detected_language_details["iterations"]
-
-                print(
-                    f"Detected language {detected_language_code} ({detected_language_prob:.2f}) after "
-                    f"{detected_language_iterations} iterations."
+                logger.info(
+                    "Detected language %s (%.2f) after %d iterations",
+                    details["language"],
+                    details["probability"],
+                    details["iterations"],
                 )
+                language = details["language"]
 
-                language = detected_language_details["language"]
-
-            start_time = time.time_ns() / 1e6
-
+            # Reuse the cached heavy model; only the lightweight pipeline wrapper
+            # (and per-request ASR/VAD options) is built here.
             model = whisperx.load_model(
                 whisper_arch,
                 device,
@@ -139,68 +172,61 @@ class Predictor(BasePredictor):
                 language=language,
                 asr_options=asr_options,
                 vad_options=vad_options,
+                model=self.whisper_model,
             )
-
-            if debug:
-                elapsed_time = time.time_ns() / 1e6 - start_time
-                print(f"Duration to load model: {elapsed_time:.2f} ms")
-
-            start_time = time.time_ns() / 1e6
-
             audio = whisperx.load_audio(audio_file)
-
-            if debug:
-                elapsed_time = time.time_ns() / 1e6 - start_time
-                print(f"Duration to load audio: {elapsed_time:.2f} ms")
-
-            start_time = time.time_ns() / 1e6
-
             result = model.transcribe(audio, batch_size=batch_size)
             detected_language = result["language"]
-
-            if debug:
-                elapsed_time = time.time_ns() / 1e6 - start_time
-                print(f"Duration to transcribe: {elapsed_time:.2f} ms")
-
+            del model
             gc.collect()
             torch.cuda.empty_cache()
-            del model
 
-            if align_output:
-                if (
-                    detected_language in DEFAULT_ALIGN_MODELS_TORCH
-                    or detected_language in DEFAULT_ALIGN_MODELS_HF
-                ):
-                    result = align(audio, result, debug)
-                else:
-                    print(
-                        f"Cannot align output as language {detected_language} is not supported for alignment"
+            if not result["segments"]:
+                logger.warning("No speech detected; returning empty subtitles.")
+            else:
+                if align_output:
+                    if (
+                        detected_language in DEFAULT_ALIGN_MODELS_TORCH
+                        or detected_language in DEFAULT_ALIGN_MODELS_HF
+                    ):
+                        result = align(audio, result, debug, self.align_models)
+                    else:
+                        logger.warning(
+                            "Cannot align output: language %s is not supported for alignment.",
+                            detected_language,
+                        )
+
+                if diarization:
+                    result = diarize(
+                        audio,
+                        result,
+                        debug,
+                        huggingface_access_token,
+                        min_speakers,
+                        max_speakers,
                     )
 
-            if diarization:
-                result = diarize(
-                    audio,
-                    result,
-                    debug,
-                    huggingface_access_token,
-                    min_speakers,
-                    max_speakers,
-                )
-
             if debug:
-                print(
-                    f"max gpu memory allocated over runtime: {torch.cuda.max_memory_reserved() / (1024**3):.2f} GB"
+                logger.info(
+                    "max gpu memory allocated over runtime: %.2f GB",
+                    torch.cuda.max_memory_reserved() / (1024**3),
                 )
 
         audio_basename = os.path.basename(str(audio_file)).rsplit(".", 1)[0]
         srt_file = f"/tmp/{audio_basename}.{detected_language}.srt"
-        result2 = copy.deepcopy(result)
-        srt_output = generate_srt(result2["segments"], language=detected_language)
+        srt_output = generate_srt(
+            result["segments"],
+            language=detected_language,
+            max_line_length=max_line_length,
+            max_lines=max_lines,
+            max_cps=max_cps,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
         with open(srt_file, "w", encoding="utf-8") as srt:
             srt.write(srt_output)
 
         return Output(
-            segments=result["segments"],
             detected_language=detected_language,
             srt_output=srt_output,
             srt_file=Path(srt_file),

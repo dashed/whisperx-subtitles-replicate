@@ -1,63 +1,60 @@
-"""Pure subtitle-formatting logic: sentence splitting, cue merging/splitting, SRT.
+"""Pure subtitle logic: sentence/clause splitting, cue merge/split, timing
+normalization, and SRT rendering.
 
 Imports only the standard library + pysbd, so it is unit-testable without the
 GPU/torch/whisperx stack.
+
+Design: the text-shaping functions (``split_at_sentence_end``,
+``merge_short_cues``, ``split_long_cues_with_word_timings``) anchor each cue to
+its raw word-level start/end times and decide *text*; a single final pass,
+``normalize_cues``, enforces all timing invariants — ordered, non-overlapping
+cues with reading-comfort (CPS) and min/max-duration bounds that never linger
+far past the actual speech. ``generate_srt`` wires them together.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
 import pysbd
 
-from .config import DESIRED_WPS
-from .types import Cue, Word
+from .config import (
+    MAX_CPS,
+    MAX_DURATION,
+    MAX_LEAD_OUT,
+    MAX_LINE_LENGTH,
+    MAX_LINES,
+    MERGE_MAX_GAP,
+    MIN_DURATION,
+    MIN_GAP,
+)
+from .types import Cue, Segment, Word
+
+logger = logging.getLogger(__name__)
+
+# Clause-break heuristic (NOTE: English-only). Split after , or ; and before a
+# coordinating/subordinating conjunction.
+_CONJUNCTIONS = (
+    "and", "but", "or", "so", "because", "if", "when", "while", "although",
+    "since", "after", "before", "unless", "until", "where", "whereas",
+    "whether", "as", "though",
+)  # fmt: skip
+_CLAUSE_SPLIT = re.compile(
+    r"(?<=[,;])\s+|(?<=\s)(?=\b(?:" + "|".join(_CONJUNCTIONS) + r")\b)"
+)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+# Short function words we avoid stranding at the end of a wrapped line.
+_NO_BREAK_AFTER = {
+    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "for",
+    "with", "as", "by", "is", "are", "was", "were",
+}  # fmt: skip
 
 
-def generate_srt(segments, language) -> str:
-    segmenter = None
-    try:
-        segmenter = pysbd.Segmenter(language=language, clean=False)
-    except Exception as e:
-        print(f"Failed to initialize segmenter for language {language}: {e}")
-
-    output_srt = ""
-
-    all_cues = []
-    for segment in segments:
-        text = segment["text"]
-        word_data = segment.get("words", [])
-
-        sentences = split_at_sentence_end(
-            segmenter=segmenter, text=text, word_data=word_data
-        )
-        all_cues.extend(sentences)
-
-    # After merging cues
-    merged_cues = merge_short_cues(
-        all_cues, min_duration=3, max_line_length=35, max_lines=2
-    )
-
-    # Split long cues using word timings
-    processed_cues = split_long_cues_with_word_timings(
-        merged_cues, max_line_length=35, max_lines=2
-    )
-
-    srt_index = 1
-    for cue in processed_cues:
-        formatted_text = split_subtitle(cue["text"])
-
-        output_srt += f"{srt_index}\n"
-        output_srt += (
-            f"{format_timestamp(cue['start'])} --> {format_timestamp(cue['end'])}\n"
-        )
-        output_srt += f"{formatted_text}\n\n"
-
-        srt_index += 1
-
-    return output_srt
-
-
+# --------------------------------------------------------------------------- #
+# Timestamp formatting
+# --------------------------------------------------------------------------- #
 def format_timestamp(seconds: float | None) -> str:
     if seconds is None or seconds < 0:
         return "00:00:00,000"
@@ -70,51 +67,87 @@ def format_timestamp(seconds: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def split_subtitle(text: str, max_chars=42) -> str:
-    words = text.split()
-    lines: list[str] = []
-    current_line: list[str] = []
-    current_length = 0
-
+# --------------------------------------------------------------------------- #
+# Line wrapping (balanced, max-2-line aware)
+# --------------------------------------------------------------------------- #
+def _greedy_lines(words: list[str], max_chars: int) -> list[list[str]]:
+    """Greedy word-wrap into lines each <= max_chars (oversize words get a line)."""
+    lines: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
     for word in words:
-        word_length = len(word)
-        if current_length + word_length + (1 if current_line else 0) > max_chars:
-            # avoid a leading blank line when the first word is oversize
-            if current_line:
-                lines.append(" ".join(current_line))
-            current_line = [word]
-            current_length = word_length
+        extra = len(word) + (1 if current else 0)
+        if current and current_len + extra > max_chars:
+            lines.append(current)
+            current, current_len = [word], len(word)
         else:
-            if current_line:
-                current_line.append(word)
-                current_length += word_length + 1  # Account for space
-            else:
-                current_line.append(word)
-                current_length += word_length
-
-    if current_line:
-        lines.append(" ".join(current_line))
-
-    return "\n".join(lines)
+            current.append(word)
+            current_len += extra
+    if current:
+        lines.append(current)
+    return lines
 
 
-def extract_words(text: str):
-    return set(re.findall(r"\b[\w\']+\b", text.lower()))
+def _balance_two(words: list[str], max_chars: int) -> list[list[str]] | None:
+    """Best 2-line split: minimize line-length difference, both <= max_chars,
+    avoiding a break right after a short function word."""
+    best: tuple[int, list[list[str]]] | None = None
+    for i in range(1, len(words)):
+        left, right = " ".join(words[:i]), " ".join(words[i:])
+        if len(left) <= max_chars and len(right) <= max_chars:
+            penalty = abs(len(left) - len(right))
+            if words[i - 1].lower().strip(",.;:!?") in _NO_BREAK_AFTER:
+                penalty += 1000
+            if best is None or penalty < best[0]:
+                best = (penalty, [words[:i], words[i:]])
+    return best[1] if best else None
+
+
+def split_subtitle(text: str, max_chars: int = MAX_LINE_LENGTH) -> str:
+    words = text.split()
+    if not words:
+        return ""
+    lines = _greedy_lines(words, max_chars)
+    if len(lines) == 2:
+        balanced = _balance_two(words, max_chars)
+        if balanced is not None:
+            lines = balanced
+    return "\n".join(" ".join(line) for line in lines)
+
+
+def _line_count(text: str, max_chars: int) -> int:
+    words = text.split()
+    return len(_greedy_lines(words, max_chars)) if words else 0
+
+
+# --------------------------------------------------------------------------- #
+# Sentence / clause splitting
+# --------------------------------------------------------------------------- #
+def _best_split_index(words: list[str], mid: int) -> int:
+    """Index nearest the midpoint that splits *after* a punctuation mark."""
+    for offset in range(len(words)):
+        for idx in (mid + offset, mid - offset):
+            if 1 <= idx < len(words) and words[idx - 1].rstrip().endswith(
+                (",", ";", ":", ".", "!", "?")
+            ):
+                return idx
+    return mid
 
 
 def _split_to_fit(part: str, max_line_length: int, max_lines: int) -> list[str]:
-    """Recursively halve a part at word boundaries until every piece fits in
-    ``max_lines`` lines (or can't be split further because it's a single word)."""
+    """Recursively split a part until each piece fits in max_lines lines,
+    preferring punctuation boundaries near the midpoint over a blind halving."""
     part = part.strip()
     if not part:
         return []
-    num_lines = len(split_subtitle(part, max_chars=max_line_length).split("\n"))
-    words = part.split()
-    if num_lines <= max_lines or len(words) <= 1:
+    if _line_count(part, max_line_length) <= max_lines:
         return [part]
-    mid_point = len(words) // 2
-    left = " ".join(words[:mid_point])
-    right = " ".join(words[mid_point:])
+    words = part.split()
+    if len(words) <= 1:
+        return [part]
+    split_idx = _best_split_index(words, len(words) // 2)
+    left = " ".join(words[:split_idx])
+    right = " ".join(words[split_idx:])
     return _split_to_fit(left, max_line_length, max_lines) + _split_to_fit(
         right, max_line_length, max_lines
     )
@@ -123,455 +156,334 @@ def _split_to_fit(part: str, max_line_length: int, max_lines: int) -> list[str]:
 def split_sentence_heuristically(
     sentence: str, max_line_length: int, max_lines: int
 ) -> list[str]:
-    # Check if the sentence exceeds formatting constraints
-    formatted_text = split_subtitle(sentence, max_chars=max_line_length)
-    num_lines = len(formatted_text.split("\n"))
-
-    if num_lines <= max_lines:
+    if _line_count(sentence, max_line_length) <= max_lines:
         return [sentence.strip()]
-
-    # If the sentence is too long, split it
-    # Define punctuation and conjunctions to split on
-    split_pattern = re.compile(
-        r"(?<=[,;])\s+|(?<=\s)(?=\b(?:and|but|or|so|because|if|when|while|although|since|after|before|unless|until|where|whereas|whether|as|though)\b)"
-    )
-
-    parts = re.split(split_pattern, sentence)
-    parts = [part.strip() for part in parts if part.strip()]
-
-    # Further split parts (recursively) until each fits within max_lines
+    parts = [p.strip() for p in _CLAUSE_SPLIT.split(sentence) if p.strip()]
     final_parts: list[str] = []
     for part in parts:
         final_parts.extend(_split_to_fit(part, max_line_length, max_lines))
-
     return final_parts
 
 
-def split_at_sentence_end(
-    segmenter: pysbd.Segmenter | None, text: str, word_data: list[Word]
-) -> list[Cue]:
+# --------------------------------------------------------------------------- #
+# Cue construction
+# --------------------------------------------------------------------------- #
+def _cue_speaker(words: list[Word] | None) -> str | None:
+    """Majority speaker label among words that carry one (set by diarization)."""
+    if not words:
+        return None
+    speakers = [w["speaker"] for w in words if w.get("speaker")]
+    if not speakers:
+        return None
+    return max(set(speakers), key=speakers.count)
 
-    sentences = []
+
+def _first_start(words: list[Word]) -> float | None:
+    return next((w["start"] for w in words if w.get("start") is not None), None)
+
+
+def _last_end(words: list[Word]) -> float | None:
+    return next((w["end"] for w in reversed(words) if w.get("end") is not None), None)
+
+
+def split_at_sentence_end(
+    segmenter: pysbd.Segmenter | None,
+    text: str,
+    word_data: list[Word],
+    max_line_length: int = MAX_LINE_LENGTH,
+    max_lines: int = MAX_LINES,
+) -> list[Cue]:
     if segmenter is not None:
         sentences = segmenter.segment(text)
     else:
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        sentences = _SENTENCE_SPLIT.split(text)
 
     result: list[Cue] = []
-    current_word_index = 0
+    word_index = 0
     for sentence in sentences:
         sentence = sentence.strip()
-        if sentence:
-            clause_splits = split_sentence_heuristically(
-                sentence, max_line_length=42, max_lines=2
-            )
-            for clause in clause_splits:
-                clause = clause.strip()
-                if clause:
-                    clause_word_count = len(clause.split())
-                    end = current_word_index + clause_word_count
-                    clause_word_data = word_data[current_word_index:end]
-                    if clause_word_data:
-                        start_time = next(
-                            (
-                                word["start"]
-                                for word in clause_word_data
-                                if "start" in word
-                            ),
-                            None,
-                        )
-                        end_time = next(
-                            (
-                                word["end"]
-                                for word in reversed(clause_word_data)
-                                if "end" in word
-                            ),
-                            None,
-                        )
-                        if start_time is not None and end_time is not None:
-                            result.append(
-                                {
-                                    "text": clause,
-                                    "start": start_time,
-                                    "end": end_time,
-                                    "word_data": clause_word_data,
-                                }
-                            )
-                        else:
-                            # Handle missing start or end times
-                            if result:
-                                prev_end = result[-1]["end"]
-                                result.append(
-                                    {
-                                        "text": clause,
-                                        "start": prev_end,
-                                        "end": prev_end + 1,
-                                        "word_data": None,
-                                    }
-                                )
-                            else:
-                                result.append(
-                                    {
-                                        "text": clause,
-                                        "start": 0,
-                                        "end": 1,
-                                        "word_data": None,
-                                    }
-                                )
-                    current_word_index += clause_word_count
+        if not sentence:
+            continue
+        for clause in split_sentence_heuristically(
+            sentence, max_line_length, max_lines
+        ):
+            clause = clause.strip()
+            if not clause:
+                continue
+            count = len(clause.split())
+            clause_words = word_data[word_index : word_index + count]
+            word_index += count
+
+            start = _first_start(clause_words) if clause_words else None
+            end = _last_end(clause_words) if clause_words else None
+            if start is not None and end is not None:
+                result.append(
+                    {
+                        "text": clause,
+                        "start": start,
+                        "end": end,
+                        "word_data": clause_words,
+                        "speaker": _cue_speaker(clause_words),
+                    }
+                )
+            else:
+                # No usable timings: anchor to the previous cue's end; the final
+                # normalize pass gives it a readable duration.
+                prev_end = result[-1]["end"] if result else 0.0
+                result.append(
+                    {
+                        "text": clause,
+                        "start": prev_end,
+                        "end": prev_end,
+                        "word_data": None,
+                        "speaker": None,
+                    }
+                )
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Cue merging / splitting
+# --------------------------------------------------------------------------- #
+def _reading_duration(text: str, max_cps: float = MAX_CPS) -> float:
+    return len(text) / max_cps if max_cps > 0 else 0.0
 
 
 def merge_short_cues(
     cues: list[Cue],
-    min_duration=3,
-    max_line_length=42,
-    max_lines=2,
-    desired_wps=DESIRED_WPS,
+    max_line_length: int = MAX_LINE_LENGTH,
+    max_lines: int = MAX_LINES,
+    max_cps: float = MAX_CPS,
+    min_duration: float = MIN_DURATION,
+    max_gap: float = MERGE_MAX_GAP,
 ) -> list[Cue]:
-    merged_cues: list[Cue] = []
-    current_cue: Cue | None = None
-
+    """Merge an adjacent cue into the previous one when the previous cue is too
+    short to read, the merge stays within max_lines and the reading-speed (CPS)
+    ceiling, the time gap is small, and the speaker doesn't change."""
+    merged: list[Cue] = []
     for cue in cues:
-        if current_cue is None:
-            current_cue = cue
-        else:
-            # Calculate combined text and duration
-            combined_text = current_cue["text"] + " " + cue["text"]
-            combined_word_count = len(combined_text.split())
-            combined_start = current_cue["start"]
-            combined_end = cue["end"]
-            combined_duration = combined_end - combined_start
-
-            # Determine optimal duration based on desired reading speed
-            optimal_duration = combined_word_count / desired_wps
-
-            # Use split_subtitle to check formatting constraints
-            split_lines = split_subtitle(
-                combined_text, max_chars=max_line_length
-            ).split("\n")
-            num_lines = len(split_lines)
-
-            # Decide whether to merge based on duration and formatting constraints
-            if (
-                combined_duration < min_duration or combined_duration < optimal_duration
-            ) and num_lines <= max_lines:
-                # Merge the cues
-                current_cue["text"] = combined_text
-                current_cue["end"] = combined_end
-            else:
-                # Adjust duration of current cue if needed
-                current_word_count = len(current_cue["text"].split())
-                current_duration = current_cue["end"] - current_cue["start"]
-                optimal_current_duration = current_word_count / desired_wps
-                if (
-                    current_duration < min_duration
-                    or current_duration < optimal_current_duration
-                ):
-                    # Stretch toward the optimal/min duration, but never past the
-                    # next cue's start and never shorter than it already is.
-                    current_cue["end"] = max(
-                        current_cue["end"],
-                        min(
-                            current_cue["start"]
-                            + max(optimal_current_duration, min_duration),
-                            cue["start"] - 0.1,
-                        ),
-                    )
-                merged_cues.append(current_cue)
-                current_cue = cue
-
-    if current_cue:
-        # Adjust duration of the last cue if needed
-        current_word_count = len(current_cue["text"].split())
-        current_duration = current_cue["end"] - current_cue["start"]
-        optimal_current_duration = current_word_count / desired_wps
-        if (
-            current_duration < min_duration
-            or current_duration < optimal_current_duration
-        ):
-            current_cue["end"] = current_cue["start"] + max(
-                optimal_current_duration, min_duration
+        if not merged:
+            merged.append(cue)
+            continue
+        prev = merged[-1]
+        combined_text = prev["text"] + " " + cue["text"]
+        gap = cue["start"] - prev["end"]
+        prev_duration = prev["end"] - prev["start"]
+        combined_duration = cue["end"] - prev["start"]
+        too_short = prev_duration < max(
+            min_duration, _reading_duration(prev["text"], max_cps)
+        )
+        fits = _line_count(combined_text, max_line_length) <= max_lines
+        cps_ok = (
+            combined_duration <= 0 or len(combined_text) <= max_cps * combined_duration
+        )
+        same_speaker = prev.get("speaker") == cue.get("speaker")
+        if too_short and fits and cps_ok and 0 <= gap <= max_gap and same_speaker:
+            prev["text"] = combined_text
+            prev["end"] = cue["end"]
+            prev_wd, cue_wd = prev.get("word_data"), cue.get("word_data")
+            prev["word_data"] = (
+                prev_wd + cue_wd if prev_wd is not None and cue_wd is not None else None
             )
-        merged_cues.append(current_cue)
+        else:
+            merged.append(cue)
+    return merged
 
-    return merged_cues
+
+def _make_chunk_cue(words: list[str], word_data: list[Word], parent: Cue) -> Cue:
+    start = _first_start(word_data)
+    end = _last_end(word_data)
+    return {
+        "text": " ".join(words),
+        "start": start if start is not None else parent["start"],
+        "end": end if end is not None else parent["end"],
+        "word_data": word_data,
+        "speaker": _cue_speaker(word_data),
+    }
 
 
 def split_long_cue_without_word_timings(
-    cue: Cue, max_line_length=42, max_lines=2
+    cue: Cue, max_line_length: int = MAX_LINE_LENGTH, max_lines: int = MAX_LINES
 ) -> list[Cue]:
-    # Split the text into lines
-    split_text = split_subtitle(cue["text"], max_chars=max_line_length)
-    lines = split_text.split("\n")
-    # Split lines into chunks of max_lines lines
-    chunks = []
-    current_chunk = []
+    """Split a cue with no usable word timings into max_lines-line chunks,
+    distributing the cue's duration proportionally by chunk length."""
+    lines = split_subtitle(cue["text"], max_chars=max_line_length).split("\n")
+    chunks: list[str] = []
+    current: list[str] = []
     for line in lines:
-        current_chunk.append(line)
-        if len(current_chunk) == max_lines:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = []
-    if current_chunk:
-        chunks.append("\n".join(current_chunk))
-    # Distribute the cue's duration among the chunks proportionally
-    total_text_length = sum(len(chunk.replace("\n", " ")) for chunk in chunks)
-    start_time = cue["start"]
-    end_time = cue["end"]
-    total_duration = end_time - start_time if end_time > start_time else 0
+        current.append(line)
+        if len(current) == max_lines:
+            chunks.append("\n".join(current))
+            current = []
+    if current:
+        chunks.append("\n".join(current))
+
+    total_len = sum(len(c.replace("\n", " ")) for c in chunks)
+    start = cue["start"]
+    total_duration = max(cue["end"] - cue["start"], 0.0)
     new_cues: list[Cue] = []
     for chunk in chunks:
-        chunk_text_length = len(chunk.replace("\n", " "))
-        proportion = (
-            chunk_text_length / total_text_length if total_text_length > 0 else 0
-        )
-        chunk_duration = total_duration * proportion if total_duration > 0 else 0
-        chunk_end_time = start_time + chunk_duration
+        proportion = len(chunk.replace("\n", " ")) / total_len if total_len > 0 else 0
+        chunk_end = start + total_duration * proportion
         new_cues.append(
             {
                 "text": chunk,
-                "start": start_time,
-                "end": chunk_end_time,
+                "start": start,
+                "end": chunk_end,
                 "word_data": None,
+                "speaker": cue.get("speaker"),
             }
         )
-        start_time = chunk_end_time  # Next chunk starts here
+        start = chunk_end
     return new_cues
 
 
 def split_long_cues_with_word_timings(
     cues: list[Cue],
-    max_line_length=42,
-    max_lines=2,
-    min_duration=5.0 / 6.0,
-    desired_wps=DESIRED_WPS,
-    max_gap_duration=1.5,  # Maximum acceptable time gap between chunks for merging
+    max_line_length: int = MAX_LINE_LENGTH,
+    max_lines: int = MAX_LINES,
 ) -> list[Cue]:
+    """Split cues that exceed max_lines into chunks, anchoring each chunk to its
+    own word-level timings. Cues without aligned word data fall back to the
+    proportional splitter."""
     new_cues: list[Cue] = []
     for cue in cues:
         words = cue["text"].split()
-        word_timings = cue.get("word_data")
-        if not word_timings or len(words) != len(word_timings):
-            # Handle missing word_data or mismatched lengths
-            # Fallback to splitting without word timings
-            split_cues = split_long_cue_without_word_timings(
-                cue, max_line_length, max_lines
-            )
-            new_cues.extend(split_cues)
+        word_data = cue.get("word_data")
+        if not word_data or len(words) != len(word_data):
+            if _line_count(cue["text"], max_line_length) <= max_lines:
+                new_cues.append(cue)
+            else:
+                new_cues.extend(
+                    split_long_cue_without_word_timings(cue, max_line_length, max_lines)
+                )
             continue
 
-        # Chunk the cue based on max_line_length and max_lines
-        chunks = []
-        current_chunk_words = []
-        current_chunk_timings = []
+        if _line_count(cue["text"], max_line_length) <= max_lines:
+            new_cues.append(cue)
+            continue
 
-        for word, word_timing in zip(words, word_timings, strict=True):
-            # Tentatively add the word to the current chunk
-            temp_chunk_words = current_chunk_words + [word]
-            temp_chunk_text = " ".join(temp_chunk_words)
-            temp_formatted_text = split_subtitle(
-                temp_chunk_text, max_chars=max_line_length
-            )
-            num_lines = len(temp_formatted_text.split("\n"))
-
-            if num_lines > max_lines and current_chunk_words:
-                # Adding this word exceeds max_lines, so finalize the current chunk
-                chunks.append(
-                    {
-                        "words": current_chunk_words.copy(),
-                        "timings": current_chunk_timings.copy(),
-                    }
-                )
-                # Start new chunk with the current word
-                current_chunk_words = [word]
-                current_chunk_timings = [word_timing]
+        current_words: list[str] = []
+        current_wd: list[Word] = []
+        for word, timing in zip(words, word_data, strict=True):
+            trial = current_words + [word]
+            if (
+                current_words
+                and _line_count(" ".join(trial), max_line_length) > max_lines
+            ):
+                new_cues.append(_make_chunk_cue(current_words, current_wd, cue))
+                current_words, current_wd = [word], [timing]
             else:
-                # Add the word to current chunk
-                current_chunk_words.append(word)
-                current_chunk_timings.append(word_timing)
+                current_words.append(word)
+                current_wd.append(timing)
+        if current_words:
+            new_cues.append(_make_chunk_cue(current_words, current_wd, cue))
+    return new_cues
 
-        # Add any remaining words as a chunk
-        if current_chunk_words:
-            chunks.append(
-                {
-                    "words": current_chunk_words.copy(),
-                    "timings": current_chunk_timings.copy(),
-                }
+
+# --------------------------------------------------------------------------- #
+# Timing normalization (the synchronization safety net)
+# --------------------------------------------------------------------------- #
+def normalize_cues(
+    cues: list[Cue],
+    min_duration: float = MIN_DURATION,
+    max_duration: float = MAX_DURATION,
+    max_cps: float = MAX_CPS,
+    min_gap: float = MIN_GAP,
+    max_lead_out: float = MAX_LEAD_OUT,
+) -> list[Cue]:
+    """Final pass guaranteeing cues are ordered and non-overlapping, with
+    reading-comfort durations that never linger far past the actual speech.
+
+    Invariants on the result: start[i] >= end[i-1] + min_gap; end >= start;
+    end <= next_start - min_gap; duration bounded by [min_duration, max_duration]
+    where ordering allows; end <= last_spoken_word_end + max_lead_out."""
+    out: list[Cue] = []
+    n = len(cues)
+    for i, cue in enumerate(cues):
+        start = float(cue["start"])
+        end = float(cue["end"])
+
+        if out:  # no overlap with previous
+            start = max(start, out[-1]["end"] + min_gap)
+        end = max(end, start)
+
+        # reading-comfort floor: the cue must stay long enough to read
+        reading_end = start + max(min_duration, _reading_duration(cue["text"], max_cps))
+        end = max(end, reading_end)
+
+        # soft cap: prefer not to linger far past the spoken audio, but never
+        # below the reading floor (readability wins over a tight lead-out)
+        word_data = cue.get("word_data")
+        word_end = _last_end(word_data) if word_data else None
+        if word_end is not None:
+            end = min(end, max(word_end + max_lead_out, reading_end))
+
+        # hard caps: absolute max duration, then never overlap the next cue
+        end = min(end, start + max_duration)
+        if i + 1 < n:
+            end = min(end, float(cues[i + 1]["start"]) - min_gap)
+
+        end = max(end, start)  # overlap-avoidance may have squeezed below start
+        out.append(
+            {
+                "text": cue["text"],
+                "start": start,
+                "end": end,
+                "word_data": cue.get("word_data"),
+                "speaker": cue.get("speaker"),
+            }
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Top-level SRT generation
+# --------------------------------------------------------------------------- #
+def generate_srt(
+    segments: list[Segment],
+    language: str,
+    *,
+    max_line_length: int = MAX_LINE_LENGTH,
+    max_lines: int = MAX_LINES,
+    max_cps: float = MAX_CPS,
+    min_duration: float = MIN_DURATION,
+    max_duration: float = MAX_DURATION,
+) -> str:
+    segmenter = None
+    try:
+        segmenter = pysbd.Segmenter(language=language, clean=False)
+    except Exception as e:  # pysbd raises for unsupported languages
+        logger.warning(
+            "pysbd segmenter unavailable for language %r (%s); using regex fallback",
+            language,
+            e,
+        )
+
+    cues: list[Cue] = []
+    for segment in segments:
+        cues.extend(
+            split_at_sentence_end(
+                segmenter,
+                segment["text"],
+                segment.get("words", []),
+                max_line_length,
+                max_lines,
             )
+        )
 
-        # Process chunks to create new cues with duration adjustments
-        for i, chunk in enumerate(chunks):
-            chunk_words = chunk["words"]
-            chunk_word_timings = chunk["timings"]
-            chunk_text = " ".join(chunk_words)
-            # chunk_formatted_text = split_subtitle(chunk_text, max_chars=max_line_length)
-            # num_lines = len(chunk_formatted_text.split("\n"))
-            # # If the chunk still exceeds max_lines, handle accordingly
-            # if num_lines > max_lines:
-            #     # Optional: Implement recursive splitting or accept that this chunk exceeds max_lines
-            #     # For now, we'll proceed without further splitting
-            #     pass
+    cues = merge_short_cues(cues, max_line_length, max_lines, max_cps, min_duration)
+    cues = split_long_cues_with_word_timings(cues, max_line_length, max_lines)
+    cues = normalize_cues(cues, min_duration, max_duration, max_cps)
 
-            # Get start and end times
-            start_time = next(
-                (
-                    wt.get("start")
-                    for wt in chunk_word_timings
-                    if wt.get("start") is not None
-                ),
-                cue["start"],
-            )
-            end_time = next(
-                (
-                    wt.get("end")
-                    for wt in reversed(chunk_word_timings)
-                    if wt.get("end") is not None
-                ),
-                cue["end"],
-            )
-            duration = end_time - start_time
-
-            # Calculate speech rate
-            chunk_word_count = len(chunk_words)
-            speech_rate_wps = (
-                chunk_word_count / duration if duration > 0 else float("inf")
-            )
-
-            # Determine optimal duration based on desired reading speed
-            optimal_duration = chunk_word_count / desired_wps
-
-            # Ensure duration is at least min_duration
-            if duration < min_duration:
-                # Try to merge with the next chunk
-                if i + 1 < len(chunks):
-                    # Merge with next chunk
-                    next_chunk = chunks[i + 1]
-                    next_chunk_start_time = next_chunk["timings"][0].get(
-                        "start", cue["end"]
-                    )
-                    time_gap = next_chunk_start_time - end_time
-
-                    if time_gap <= max_gap_duration:
-                        merged_words = chunk_words + next_chunk["words"]
-                        merged_timings = chunk_word_timings + next_chunk["timings"]
-                        merged_text = " ".join(merged_words)
-                        merged_formatted_text = split_subtitle(
-                            merged_text, max_chars=max_line_length
-                        )
-                        num_lines = len(merged_formatted_text.split("\n"))
-
-                        # Check if merged cue respects formatting constraints
-                        if (
-                            num_lines <= max_lines + 1
-                        ):  # Allow one extra line for merging
-                            # Update the next chunk with merged data
-                            chunks[i + 1] = {
-                                "words": merged_words,
-                                "timings": merged_timings,
-                            }
-                            # print(
-                            #     f"Merged cues: '{chunk_text}' + '{next_chunk['words']}'"
-                            # )
-                            continue  # Skip adding current chunk, as it's merged
-                # Else, try to merge with the previous chunk
-                elif new_cues:
-                    prev_cue = new_cues[-1]
-                    prev_cue_end_time = prev_cue["end"]
-                    time_gap = start_time - prev_cue_end_time
-
-                    if time_gap <= max_gap_duration:
-                        merged_text = prev_cue["text"] + " " + chunk_text
-                        merged_formatted_text = split_subtitle(
-                            merged_text, max_chars=max_line_length
-                        )
-                        num_lines = len(merged_formatted_text.split("\n"))
-                        if (
-                            num_lines <= max_lines + 1
-                        ):  # Allow one extra line for merging
-                            # Update previous cue with merged data
-                            prev_cue["text"] = merged_text
-                            prev_cue["end"] = end_time
-                            # Handle 'word_data'
-                            prev_word_data = prev_cue.get("word_data", [])
-                            prev_cue["word_data"] = prev_word_data + chunk_word_timings
-                            # print(f"Merged cues: '{prev_cue['text']}' + '{chunk_text}'")
-                            # print("end_time", end_time)
-                            continue
-                # If cannot merge, proceed with current chunk
-                print(f"Cue '{chunk_text}' has short duration ({duration}s)")
-
-            # Adjust duration based on speech rate
-            adjusted_end_time = end_time
-            if speech_rate_wps > desired_wps:
-                # Speech is faster than desired reading speed; increase duration
-                adjusted_duration = max(duration, optimal_duration)
-                adjusted_end_time = start_time + adjusted_duration
-                # Ensure we do not overlap with next chunk or cue's end
-                next_start_time = (
-                    chunks[i + 1]["timings"][0].get("start", cue["end"])
-                    if i + 1 < len(chunks)
-                    else cue["end"]
-                )
-                if adjusted_end_time > next_start_time:
-                    adjusted_end_time = min(next_start_time - 0.1, adjusted_end_time)
-            elif speech_rate_wps < desired_wps and duration > optimal_duration:
-                # Speech is slower than desired reading speed; decrease duration
-                adjusted_duration = max(optimal_duration, min_duration)
-                adjusted_end_time = start_time + adjusted_duration
-                if adjusted_end_time < end_time:
-                    # We should not shorten the duration below the current duration
-                    adjusted_end_time = end_time
-
-            # Ensure duration is at least min_duration
-            if adjusted_end_time - start_time < min_duration:
-                adjusted_end_time = start_time + min_duration
-
-            # Update the cue
-            new_cues.append(
-                {
-                    "text": chunk_text,
-                    "start": start_time,
-                    "end": adjusted_end_time,
-                    "word_data": chunk_word_timings,
-                }
-            )
-
-    # Adjust durations of new_cues based on speech rate
-    adjusted_cues = []
-    for i, cue in enumerate(new_cues):
-        text = cue["text"]
-        start_time = cue["start"]
-        end_time = cue["end"]
-        duration = end_time - start_time
-        word_count = len(text.split())
-        optimal_duration = word_count / desired_wps
-
-        # Adjust duration based on speech rate
-        adjusted_end_time = end_time
-        if duration < optimal_duration:
-            adjusted_end_time = start_time + optimal_duration
-            # Ensure we do not overlap with the next cue
-            next_start_time = (
-                new_cues[i + 1]["start"] if i + 1 < len(new_cues) else cue["end"]
-            )
-            if adjusted_end_time > next_start_time:
-                adjusted_end_time = min(next_start_time - 0.01, adjusted_end_time)
-
-        # Ensure duration is at least min_duration
-        if adjusted_end_time - start_time < min_duration:
-            adjusted_end_time = start_time + min_duration
-            # Ensure we do not overlap with the next cue
-            next_start_time = (
-                new_cues[i + 1]["start"] if i + 1 < len(new_cues) else cue["end"]
-            )
-            if adjusted_end_time > next_start_time:
-                adjusted_end_time = min(next_start_time - 0.01, adjusted_end_time)
-            # If still less than start_time, accept the shorter duration
-            if adjusted_end_time <= start_time:
-                adjusted_end_time = start_time + (next_start_time - start_time) / 2
-
-        # Update cue's end time
-        cue["end"] = adjusted_end_time
-        adjusted_cues.append(cue)
-
-    return adjusted_cues
+    output_srt = ""
+    for index, cue in enumerate(cues, start=1):
+        text = split_subtitle(cue["text"], max_chars=max_line_length)
+        speaker = cue.get("speaker")
+        prefix = f"[{speaker}] " if speaker else ""
+        output_srt += f"{index}\n"
+        output_srt += (
+            f"{format_timestamp(cue['start'])} --> {format_timestamp(cue['end'])}\n"
+        )
+        output_srt += f"{prefix}{text}\n\n"
+    return output_srt
