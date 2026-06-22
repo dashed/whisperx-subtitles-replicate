@@ -23,12 +23,6 @@ download "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/pr
 download "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/tokenizer.json" "$faster_whisper_model_dir/tokenizer.json"
 download "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/vocabulary.json" "$faster_whisper_model_dir/vocabulary.json"
 
-# Download whisperx-vad-segmentation model
-pip install -U git+https://github.com/m-bain/whisperx.git
-
-vad_model_dir=models/vad
-mkdir -p $vad_model_dir
-
-download $(python3 ./get_vad_model_url.py) "$vad_model_dir/whisperx-vad-segmentation.bin"
-
-# cog run python
+# The VAD segmentation model no longer needs to be pre-downloaded: current
+# whisperx ships it inside the package (whisperx/assets/pytorch_model.bin) and
+# loads it from there, so it is already present once dependencies are installed.

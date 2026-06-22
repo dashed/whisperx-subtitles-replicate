@@ -3,17 +3,18 @@ import gc
 import math
 import os
 import re
-import shutil
 import tempfile
 import time
-from typing import Any, List, Optional, TypedDict
+from typing import Any, TypedDict
 
 import ffmpeg
 import pysbd
 import torch
 import whisperx
 from cog import BaseModel, BasePredictor, Input, Path
+from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 from whisperx.audio import N_SAMPLES, log_mel_spectrogram
+from whisperx.diarize import DiarizationPipeline
 
 compute_type = "float16"  # change to "int8" if low on GPU mem (may reduce accuracy)
 device = "cuda"
@@ -23,27 +24,27 @@ DESIRED_WPS = 4  # Words per second for comfortable reading
 
 
 class Word(TypedDict):
-    end: Optional[float]
+    end: float | None
     word: str
-    score: Optional[float]
-    start: Optional[float]
+    score: float | None
+    start: float | None
 
 
 class Segment(TypedDict):
     end: float
     text: str
     start: float
-    words: List[Word]
+    words: list[Word]
 
 
 class Cue(TypedDict):
     text: str
     start: float
     end: float
-    word_data: Optional[List[Word]]
+    word_data: list[Word] | None
 
 
-Segments = List[Segment]
+Segments = list[Segment]
 
 
 class Output(BaseModel):
@@ -54,24 +55,10 @@ class Output(BaseModel):
 
 
 class Predictor(BasePredictor):
-    def setup(self):
-        source_folder = "./models/vad"
-        destination_folder = "../root/.cache/torch"
-        file_name = "whisperx-vad-segmentation.bin"
-
-        os.makedirs(destination_folder, exist_ok=True)
-
-        source_file_path = os.path.join(source_folder, file_name)
-        if os.path.exists(source_file_path):
-            destination_file_path = os.path.join(destination_folder, file_name)
-
-            if not os.path.exists(destination_file_path):
-                shutil.copy(source_file_path, destination_folder)
-
     def predict(
         self,
         audio_file: Path = Input(description="Audio file"),
-        language: str = Input(
+        language: str | None = Input(
             description="ISO code of the language spoken in the audio, specify None to perform language detection",
             default=None,
         ),
@@ -86,7 +73,7 @@ class Predictor(BasePredictor):
             "retries is reached, the most probable language is kept.",
             default=5,
         ),
-        initial_prompt: str = Input(
+        initial_prompt: str | None = Input(
             description="Optional text to provide as a prompt for the first window",
             default=None,
         ),
@@ -105,16 +92,16 @@ class Predictor(BasePredictor):
         diarization: bool = Input(
             description="Assign speaker ID labels", default=False
         ),
-        huggingface_access_token: str = Input(
+        huggingface_access_token: str | None = Input(
             description="To enable diarization, please enter your HuggingFace token (read). You need to accept "
             "the user agreement for the models specified in the README.",
             default=None,
         ),
-        min_speakers: int = Input(
+        min_speakers: int | None = Input(
             description="Minimum number of speakers if diarization is activated (leave blank if unknown)",
             default=None,
         ),
-        max_speakers: int = Input(
+        max_speakers: int | None = Input(
             description="Maximum number of speakers if diarization is activated (leave blank if unknown)",
             default=None,
         ),
@@ -212,8 +199,8 @@ class Predictor(BasePredictor):
 
             if align_output:
                 if (
-                    detected_language in whisperx.alignment.DEFAULT_ALIGN_MODELS_TORCH
-                    or detected_language in whisperx.alignment.DEFAULT_ALIGN_MODELS_HF
+                    detected_language in DEFAULT_ALIGN_MODELS_TORCH
+                    or detected_language in DEFAULT_ALIGN_MODELS_HF
                 ):
                     result = align(audio, result, debug)
                 else:
@@ -233,7 +220,7 @@ class Predictor(BasePredictor):
 
             if debug:
                 print(
-                    f"max gpu memory allocated over runtime: {torch.cuda.max_memory_reserved() / (1024 ** 3):.2f} GB"
+                    f"max gpu memory allocated over runtime: {torch.cuda.max_memory_reserved() / (1024**3):.2f} GB"
                 )
 
         audio_basename = os.path.basename(str(audio_file)).rsplit(".", 1)[0]
@@ -256,6 +243,8 @@ def get_audio_duration(file_path):
     stream = next(
         (stream for stream in probe["streams"] if stream["codec_type"] == "audio"), None
     )
+    if stream is None:
+        raise ValueError(f"No audio stream found in {file_path}")
     return float(stream["duration"]) * 1000
 
 
@@ -407,9 +396,7 @@ def align(audio, result, debug):
 def diarize(audio, result, debug, huggingface_access_token, min_speakers, max_speakers):
     start_time = time.time_ns() / 1e6
 
-    diarize_model = whisperx.DiarizationPipeline(
-        use_auth_token=huggingface_access_token, device=device
-    )
+    diarize_model = DiarizationPipeline(token=huggingface_access_token, device=device)
     diarize_segments = diarize_model(
         audio, min_speakers=min_speakers, max_speakers=max_speakers
     )
@@ -482,8 +469,8 @@ def format_timestamp(seconds: float | None) -> str:
 
 def split_subtitle(text: str, max_chars=42) -> str:
     words = text.split()
-    lines: List[str] = []
-    current_line: List[str] = []
+    lines: list[str] = []
+    current_line: list[str] = []
     current_length = 0
 
     for word in words:
@@ -512,7 +499,7 @@ def extract_words(text: str):
 
 def split_sentence_heuristically(
     sentence: str, max_line_length: int, max_lines: int
-) -> List[str]:
+) -> list[str]:
     # Check if the sentence exceeds formatting constraints
     formatted_text = split_subtitle(sentence, max_chars=max_line_length)
     num_lines = len(formatted_text.split("\n"))
@@ -548,8 +535,8 @@ def split_sentence_heuristically(
 
 
 def split_at_sentence_end(
-    segmenter: Optional[pysbd.Segmenter], text: str, word_data: List[Word]
-) -> List[Cue]:
+    segmenter: pysbd.Segmenter | None, text: str, word_data: list[Word]
+) -> list[Cue]:
 
     sentences = []
     if segmenter is not None:
@@ -557,7 +544,7 @@ def split_at_sentence_end(
     else:
         sentences = re.split(r"(?<=[.!?])\s+", text)
 
-    result: List[Cue] = []
+    result: list[Cue] = []
     current_word_index = 0
     for sentence in sentences:
         sentence = sentence.strip()
@@ -606,6 +593,7 @@ def split_at_sentence_end(
                                         "text": clause,
                                         "start": prev_end,
                                         "end": prev_end + 1,
+                                        "word_data": None,
                                     }
                                 )
                             else:
@@ -614,6 +602,7 @@ def split_at_sentence_end(
                                         "text": clause,
                                         "start": 0,
                                         "end": 1,
+                                        "word_data": None,
                                     }
                                 )
                     current_word_index += clause_word_count
@@ -621,14 +610,14 @@ def split_at_sentence_end(
 
 
 def merge_short_cues(
-    cues: List[Cue],
+    cues: list[Cue],
     min_duration=3,
     max_line_length=42,
     max_lines=2,
     desired_wps=DESIRED_WPS,
-) -> List[Cue]:
-    merged_cues: List[Cue] = []
-    current_cue: Optional[Cue] = None
+) -> list[Cue]:
+    merged_cues: list[Cue] = []
+    current_cue: Cue | None = None
 
     for cue in cues:
         if current_cue is None:
@@ -693,7 +682,7 @@ def merge_short_cues(
 
 def split_long_cue_without_word_timings(
     cue: Cue, max_line_length=42, max_lines=2
-) -> List[Cue]:
+) -> list[Cue]:
     # Split the text into lines
     split_text = split_subtitle(cue["text"], max_chars=max_line_length)
     lines = split_text.split("\n")
@@ -712,7 +701,7 @@ def split_long_cue_without_word_timings(
     start_time = cue["start"]
     end_time = cue["end"]
     total_duration = end_time - start_time if end_time > start_time else 0
-    new_cues = []
+    new_cues: list[Cue] = []
     for chunk in chunks:
         chunk_text_length = len(chunk.replace("\n", " "))
         proportion = (
@@ -720,20 +709,27 @@ def split_long_cue_without_word_timings(
         )
         chunk_duration = total_duration * proportion if total_duration > 0 else 0
         chunk_end_time = start_time + chunk_duration
-        new_cues.append({"text": chunk, "start": start_time, "end": chunk_end_time})
+        new_cues.append(
+            {
+                "text": chunk,
+                "start": start_time,
+                "end": chunk_end_time,
+                "word_data": None,
+            }
+        )
         start_time = chunk_end_time  # Next chunk starts here
     return new_cues
 
 
 def split_long_cues_with_word_timings(
-    cues: List[Cue],
+    cues: list[Cue],
     max_line_length=42,
     max_lines=2,
     min_duration=5.0 / 6.0,
     desired_wps=DESIRED_WPS,
     max_gap_duration=1.5,  # Maximum acceptable time gap between chunks for merging
-) -> List[Cue]:
-    new_cues: List[Cue] = []
+) -> list[Cue]:
+    new_cues: list[Cue] = []
     for cue in cues:
         words = cue["text"].split()
         word_timings = cue.get("word_data")
@@ -751,7 +747,7 @@ def split_long_cues_with_word_timings(
         current_chunk_words = []
         current_chunk_timings = []
 
-        for idx, (word, word_timing) in enumerate(zip(words, word_timings)):
+        for word, word_timing in zip(words, word_timings, strict=True):
             # Tentatively add the word to the current chunk
             temp_chunk_words = current_chunk_words + [word]
             temp_chunk_text = " ".join(temp_chunk_words)

@@ -3,6 +3,7 @@ whisperx.egg-info/
 .ipynb_checkpoints
 .idea
 venv
+.venv/
 hg_access_token.txt
 
 .cog/
