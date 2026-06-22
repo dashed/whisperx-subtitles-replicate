@@ -58,7 +58,7 @@ class Predictor(BasePredictor):
     def predict(
         self,
         audio_file: Path = Input(description="Audio file"),
-        language: str = Input(
+        language: str | None = Input(
             description="ISO code of the language spoken in the audio, specify None to perform language detection",
             default=None,
         ),
@@ -73,7 +73,7 @@ class Predictor(BasePredictor):
             "retries is reached, the most probable language is kept.",
             default=5,
         ),
-        initial_prompt: str = Input(
+        initial_prompt: str | None = Input(
             description="Optional text to provide as a prompt for the first window",
             default=None,
         ),
@@ -92,16 +92,16 @@ class Predictor(BasePredictor):
         diarization: bool = Input(
             description="Assign speaker ID labels", default=False
         ),
-        huggingface_access_token: str = Input(
+        huggingface_access_token: str | None = Input(
             description="To enable diarization, please enter your HuggingFace token (read). You need to accept "
             "the user agreement for the models specified in the README.",
             default=None,
         ),
-        min_speakers: int = Input(
+        min_speakers: int | None = Input(
             description="Minimum number of speakers if diarization is activated (leave blank if unknown)",
             default=None,
         ),
-        max_speakers: int = Input(
+        max_speakers: int | None = Input(
             description="Maximum number of speakers if diarization is activated (leave blank if unknown)",
             default=None,
         ),
