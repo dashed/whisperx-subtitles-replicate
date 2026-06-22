@@ -59,12 +59,15 @@ def generate_srt(segments, language) -> str:
 
 
 def format_timestamp(seconds: float | None) -> str:
-    if seconds is None:
+    if seconds is None or seconds < 0:
         return "00:00:00,000"
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    seconds = seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}".replace(".", ",")
+    # Work in integer milliseconds so rounding rolls over correctly
+    # (e.g. 59.9999s -> 00:01:00,000, not the invalid 00:00:60,000).
+    total_ms = round(seconds * 1000)
+    hours, total_ms = divmod(total_ms, 3_600_000)
+    minutes, total_ms = divmod(total_ms, 60_000)
+    secs, millis = divmod(total_ms, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
 def split_subtitle(text: str, max_chars=42) -> str:
@@ -76,7 +79,9 @@ def split_subtitle(text: str, max_chars=42) -> str:
     for word in words:
         word_length = len(word)
         if current_length + word_length + (1 if current_line else 0) > max_chars:
-            lines.append(" ".join(current_line))
+            # avoid a leading blank line when the first word is oversize
+            if current_line:
+                lines.append(" ".join(current_line))
             current_line = [word]
             current_length = word_length
         else:
@@ -95,6 +100,24 @@ def split_subtitle(text: str, max_chars=42) -> str:
 
 def extract_words(text: str):
     return set(re.findall(r"\b[\w\']+\b", text.lower()))
+
+
+def _split_to_fit(part: str, max_line_length: int, max_lines: int) -> list[str]:
+    """Recursively halve a part at word boundaries until every piece fits in
+    ``max_lines`` lines (or can't be split further because it's a single word)."""
+    part = part.strip()
+    if not part:
+        return []
+    num_lines = len(split_subtitle(part, max_chars=max_line_length).split("\n"))
+    words = part.split()
+    if num_lines <= max_lines or len(words) <= 1:
+        return [part]
+    mid_point = len(words) // 2
+    left = " ".join(words[:mid_point])
+    right = " ".join(words[mid_point:])
+    return _split_to_fit(left, max_line_length, max_lines) + _split_to_fit(
+        right, max_line_length, max_lines
+    )
 
 
 def split_sentence_heuristically(
@@ -116,20 +139,10 @@ def split_sentence_heuristically(
     parts = re.split(split_pattern, sentence)
     parts = [part.strip() for part in parts if part.strip()]
 
-    # Further split parts if they are still too long
-    final_parts = []
+    # Further split parts (recursively) until each fits within max_lines
+    final_parts: list[str] = []
     for part in parts:
-        formatted_part = split_subtitle(part, max_chars=max_line_length)
-        num_lines_part = len(formatted_part.split("\n"))
-        if num_lines_part > max_lines:
-            # Split long parts at spaces
-            words = part.split()
-            mid_point = len(words) // 2
-            part1 = " ".join(words[:mid_point])
-            part2 = " ".join(words[mid_point:])
-            final_parts.extend([part1.strip(), part2.strip()])
-        else:
-            final_parts.append(part)
+        final_parts.extend(_split_to_fit(part, max_line_length, max_lines))
 
     return final_parts
 
@@ -255,10 +268,15 @@ def merge_short_cues(
                     current_duration < min_duration
                     or current_duration < optimal_current_duration
                 ):
-                    current_cue["end"] = min(
-                        current_cue["start"]
-                        + max(optimal_current_duration, min_duration),
-                        cue["start"] - 0.1,
+                    # Stretch toward the optimal/min duration, but never past the
+                    # next cue's start and never shorter than it already is.
+                    current_cue["end"] = max(
+                        current_cue["end"],
+                        min(
+                            current_cue["start"]
+                            + max(optimal_current_duration, min_duration),
+                            cue["start"] - 0.1,
+                        ),
                     )
                 merged_cues.append(current_cue)
                 current_cue = cue
