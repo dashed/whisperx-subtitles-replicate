@@ -9,16 +9,7 @@ from cog import BaseModel, BaseRunner, Input, Path
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 
 from whisperx_subtitles.audio import distribute_segments_equally, get_audio_duration
-from whisperx_subtitles.config import (
-    MAX_CPS,
-    MAX_DURATION,
-    MAX_LINE_LENGTH,
-    MAX_LINES,
-    MIN_DURATION,
-    compute_type,
-    device,
-    whisper_arch,
-)
+from whisperx_subtitles.config import compute_type, device, whisper_arch
 from whisperx_subtitles.subtitles import generate_srt
 from whisperx_subtitles.transcription import align, detect_language, diarize
 
@@ -93,24 +84,23 @@ class Runner(BaseRunner):
             description="Maximum number of speakers if diarization is activated (leave blank if unknown)",
             default=None,
         ),
+        # NOTE: literal defaults (not config constants) — Cog's schema generator
+        # reads the AST and only treats a literal default as "optional"; a name
+        # reference would make the input required. Keep these in sync with config.
         max_line_length: int = Input(
-            description="Maximum number of characters per subtitle line",
-            default=MAX_LINE_LENGTH,
+            description="Maximum number of characters per subtitle line", default=42
         ),
         max_lines: int = Input(
-            description="Maximum number of lines per subtitle cue", default=MAX_LINES
+            description="Maximum number of lines per subtitle cue", default=2
         ),
         max_cps: float = Input(
-            description="Maximum reading speed in characters per second",
-            default=MAX_CPS,
+            description="Maximum reading speed in characters per second", default=17.0
         ),
         min_duration: float = Input(
-            description="Minimum seconds a subtitle stays on screen",
-            default=MIN_DURATION,
+            description="Minimum seconds a subtitle stays on screen", default=1.0
         ),
         max_duration: float = Input(
-            description="Maximum seconds a subtitle stays on screen",
-            default=MAX_DURATION,
+            description="Maximum seconds a subtitle stays on screen", default=7.0
         ),
         debug: bool = Input(
             description="Print out compute/inference times and memory usage information",
