@@ -70,6 +70,30 @@ uvx ty check              # type check
 (On the Linux GPU image, where the full dependencies are installed, you can also
 run them via `uv run ruff ...` / `uv run ty check` with full import resolution.)
 
+## Tests
+
+The subtitle/formatting logic lives in the `whisperx_subtitles` package and is
+deliberately free of the GPU stack, so the test suite runs on any machine
+without installing torch/whisperx:
+
+```sh
+uvx --with pysbd --with ffmpeg-python pytest        # any machine
+uv run pytest                                        # on the Linux image (full env)
+```
+
+## Project layout
+
+```
+predict.py                     # Cog entry point: Predictor + Output (thin glue)
+whisperx_subtitles/
+  config.py                    # runtime constants (compute_type, device, model path, WPS)
+  types.py                     # Word / Segment / Cue TypedDicts
+  subtitles.py                 # pure subtitle logic (sentence split, cue merge/split, SRT)
+  audio.py                     # ffmpeg probing + pure segment-timing math
+  transcription.py             # whisperx glue: language detection, alignment, diarization
+tests/                         # pytest suite for the pure modules
+```
+
 ## Download models
 
 ```sh

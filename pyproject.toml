@@ -18,6 +18,7 @@ dependencies = [
 dev = [
     "ruff>=0.15",
     "ty>=0.0.49",
+    "pytest>=8",
 ]
 
 [tool.uv]
@@ -61,3 +62,16 @@ python-version = "3.11"
 # only and ships no type stubs, so it can't be resolved on a dev machine. Don't
 # fail type checking on those imports; ty still checks all first-party code.
 unresolved-import = "ignore"
+
+[tool.ty.src]
+# Tests pass dict literals where TypedDicts are expected (idiomatic for tests);
+# don't type-check them — they're validated by running, not by ty.
+exclude = ["tests/**"]
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `import whisperx_subtitles` works without
+# installing the (Linux/CUDA-only) project. The pure modules under test
+# (subtitles, audio) import only stdlib + pysbd + ffmpeg-python, so the suite
+# runs anywhere — e.g. `uvx --with pysbd --with ffmpeg-python pytest`.
+pythonpath = ["."]
+testpaths = ["tests"]
