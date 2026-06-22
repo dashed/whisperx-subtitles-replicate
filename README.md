@@ -35,20 +35,48 @@ Here’s a high-level overview of how it achieves this:
 
 # Development
 
-Python environment:
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management,
+[ruff](https://docs.astral.sh/ruff/) for linting/formatting, and
+[ty](https://docs.astral.sh/ty/) for type checking. `pyproject.toml` is the
+single source of truth for dependencies.
+
+## Dependencies
+
+The runtime stack (`torch`, `whisperx`, `pyannote.audio`, ...) targets CUDA 12.8
+on Linux/x86_64 — the Replicate GPU image — and has no macOS wheels, so the
+lockfile is resolved for that platform only. Cog still builds from
+`requirements.txt`, which is generated from the lock:
 
 ```sh
-python3.11 -m venv venv
-source venv/bin/activate
+uv lock                  # resolve / update uv.lock from pyproject.toml
+uv export --frozen --no-dev --no-emit-project --no-hashes \
+  --format requirements-txt -o requirements.txt
 ```
 
-Download models:
+After exporting, re-add the `--extra-index-url https://download.pytorch.org/whl/cu128`
+line near the top of `requirements.txt` (uv omits explicit indexes on export, and
+pip needs it to find the `+cu128` torch wheels). See the header in that file.
+
+## Lint, format and type-check
+
+These run without installing the heavy GPU stack, so they work on any machine:
+
+```sh
+uvx ruff check .          # lint
+uvx ruff format .         # format
+uvx ty check              # type check
+```
+
+(On the Linux GPU image, where the full dependencies are installed, you can also
+run them via `uv run ruff ...` / `uv run ty check` with full import resolution.)
+
+## Download models
 
 ```sh
 ./build.sh
 ```
 
-Publish to cog:
+## Publish to cog
 
 ```sh
 cog login
