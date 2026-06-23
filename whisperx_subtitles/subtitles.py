@@ -246,6 +246,21 @@ def _last_end(words: list[Word]) -> float | None:
     return next((w["end"] for w in reversed(words) if w.get("end") is not None), None)
 
 
+def _segment_sentences(
+    text: str,
+    segmenter: pysbd.Segmenter | None,
+    segment_fn: Callable[[str], list[str]] | None,
+) -> list[str]:
+    """Split text into sentences: prefer an injected neural segmenter (e.g.
+    SaT/wtpsplit, supplied by the GPU side for Thai/CJK), else pysbd, else a
+    regex fallback."""
+    if segment_fn is not None:
+        return segment_fn(text)
+    if segmenter is not None:
+        return segmenter.segment(text)
+    return _SENTENCE_SPLIT.split(text)
+
+
 def split_at_sentence_end(
     segmenter: pysbd.Segmenter | None,
     text: str,
@@ -254,14 +269,7 @@ def split_at_sentence_end(
     max_lines: int = MAX_LINES,
     segment_fn: Callable[[str], list[str]] | None = None,
 ) -> list[Cue]:
-    # Sentence boundaries: prefer an injected neural segmenter (e.g. SaT/wtpsplit,
-    # supplied by the GPU side for Thai/CJK), else pysbd, else a regex fallback.
-    if segment_fn is not None:
-        sentences = segment_fn(text)
-    elif segmenter is not None:
-        sentences = segmenter.segment(text)
-    else:
-        sentences = _SENTENCE_SPLIT.split(text)
+    sentences = _segment_sentences(text, segmenter, segment_fn)
 
     if word_data and len(text.split()) != len(word_data):
         # Aligned word list is out of step with the text (e.g. whisperx dropped a
@@ -609,6 +617,11 @@ def generate_srt(
     cues = split_long_cues_with_word_timings(cues, max_line_length, max_lines)
     cues = normalize_cues(cues, min_duration, max_duration, max_cps)
 
+    return _render_srt(cues, max_line_length)
+
+
+def _render_srt(cues: list[Cue], max_line_length: int) -> str:
+    """Render finalized cues to SRT text (numbering, timing, wrapped lines)."""
     output_srt = ""
     for index, cue in enumerate(cues, start=1):
         speaker = cue.get("speaker")
@@ -622,3 +635,115 @@ def generate_srt(
         )
         output_srt += f"{text}\n\n"
     return output_srt
+
+
+# --------------------------------------------------------------------------- #
+# Translation: re-time a translated transcript onto the source audio's timing
+#
+# Naive per-cue translation breaks (lost sentence context, word-order changes,
+# length expansion). Instead: translate whole SOURCE sentences (done on the GPU
+# side), then re-segment each translation and distribute the source sentence's
+# time span across the resulting cues proportionally by character count. The
+# final normalize pass enforces reading-speed / duration / ordering invariants.
+# --------------------------------------------------------------------------- #
+def sentences_with_spans(
+    segments: list[Segment],
+    segmenter: pysbd.Segmenter | None = None,
+    segment_fn: Callable[[str], list[str]] | None = None,
+) -> list[Cue]:
+    """Source-language SENTENCES (not clause-split) with their [start, end] time
+    spans, for translation. Each cue is {"text", "start", "end", "word_data",
+    "speaker"}; sentences with no usable word timing anchor to the previous end."""
+    out: list[Cue] = []
+    for segment in segments:
+        word_data = segment.get("words", [])
+        word_index = 0
+        for sentence in _segment_sentences(segment["text"], segmenter, segment_fn):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            words, word_index = _align_clause_words(
+                sentence.split(), word_data, word_index
+            )
+            start = _first_start(words) if words else None
+            end = _last_end(words) if words else None
+            if start is None or end is None:
+                start = end = out[-1]["end"] if out else 0.0
+            out.append(
+                {
+                    "text": sentence,
+                    "start": start,
+                    "end": end,
+                    "word_data": None,
+                    "speaker": _cue_speaker(words) if words else None,
+                }
+            )
+    return out
+
+
+def fit_translation_to_span(
+    text: str,
+    source_start: float,
+    source_end: float,
+    max_line_length: int = MAX_LINE_LENGTH,
+    max_lines: int = MAX_LINES,
+) -> list[Cue]:
+    """Re-segment one translated sentence into cues that each fit max_lines, then
+    distribute [source_start, source_end] across them proportionally by character
+    count (first cue starts at source_start, last ends at source_end). The final
+    normalize pass handles reading-speed / min-max duration / gaps."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks = split_sentence_heuristically(text, max_line_length, max_lines)
+    if not chunks:
+        return []
+    weights = [max(len(c.replace("\n", " ").strip()), 1) for c in chunks]
+    total = sum(weights)
+    span = max(source_end - source_start, 0.0)
+    cues: list[Cue] = []
+    start = source_start
+    last = len(chunks) - 1
+    for i, (chunk, weight) in enumerate(zip(chunks, weights, strict=True)):
+        end = source_end if i == last else start + span * (weight / total)
+        if end < start:
+            end = start
+        cues.append(
+            {
+                "text": chunk,
+                "start": start,
+                "end": end,
+                "word_data": None,
+                "speaker": None,
+            }
+        )
+        start = end
+    return cues
+
+
+def generate_translated_srt(
+    translated_sentences: list[Cue],
+    *,
+    max_line_length: int = MAX_LINE_LENGTH,
+    max_lines: int = MAX_LINES,
+    max_cps: float = MAX_CPS,
+    min_duration: float = MIN_DURATION,
+    max_duration: float = MAX_DURATION,
+) -> str:
+    """Build an SRT from already-translated sentences carrying their SOURCE time
+    spans (the output of sentences_with_spans, with text replaced by the
+    translation). Each sentence is re-segmented + re-timed, then the whole set is
+    normalized and rendered."""
+    cues: list[Cue] = []
+    for sentence in translated_sentences:
+        cues.extend(
+            fit_translation_to_span(
+                sentence["text"],
+                float(sentence["start"]),
+                float(sentence["end"]),
+                max_line_length,
+                max_lines,
+            )
+        )
+    cues = normalize_cues(cues, min_duration, max_duration, max_cps)
+    return _render_srt(cues, max_line_length)
