@@ -9,12 +9,26 @@ from cog import BaseModel, BaseRunner, Input, Path
 from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TORCH
 
 from whisperx_subtitles.audio import distribute_segments_equally, get_audio_duration
-from whisperx_subtitles.config import compute_type, device, whisper_arch
+from whisperx_subtitles.config import (
+    SAT_MODEL,
+    compute_type,
+    device,
+    whisper_arch,
+)
 from whisperx_subtitles.subtitles import generate_srt
-from whisperx_subtitles.transcription import align, detect_language, diarize
+from whisperx_subtitles.transcription import align, align_mms, detect_language, diarize
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Languages pysbd handles natively; anything else is routed to the SaT neural
+# segmenter (covers Thai and other scripts pysbd does not support).
+try:
+    from pysbd.languages import LANGUAGE_CODES
+
+    _PYSBD_LANGS = set(LANGUAGE_CODES)
+except Exception:  # pragma: no cover - defensive; pysbd API shift
+    _PYSBD_LANGS = set()
 
 
 class Output(BaseModel):
@@ -33,6 +47,19 @@ class Runner(BaseRunner):
             whisper_arch, device, compute_type=compute_type
         ).model
         self.align_models: dict = {}
+
+        # Neural sentence segmenter (SaT/wtpsplit), used for languages pysbd does
+        # not support. Loaded once; weights are pre-cached at build time.
+        from wtpsplit import SaT
+
+        self.sat = SaT(SAT_MODEL)
+        self.sat.half().to(device)
+
+    def _segment_fn(self, text):
+        """Sentence-split with SaT; the hook generate_srt uses for non-pysbd langs."""
+        if not text or not text.strip():
+            return []
+        return [s for s in self.sat.split(text) if s.strip()]
 
     def run(
         self,
@@ -181,10 +208,12 @@ class Runner(BaseRunner):
                     ):
                         result = align(audio, result, debug, self.align_models)
                     else:
-                        logger.warning(
-                            "Cannot align output: language %s is not supported for alignment.",
+                        logger.info(
+                            "Language %s outside whisperx's alignment set; using "
+                            "MMS forced-alignment fallback for word timestamps.",
                             detected_language,
                         )
+                        result = align_mms(audio, result, debug, self.align_models)
 
                 if diarization:
                     result = diarize(
@@ -204,6 +233,9 @@ class Runner(BaseRunner):
 
         audio_basename = os.path.basename(str(audio_file)).rsplit(".", 1)[0]
         srt_file = f"/tmp/{audio_basename}.{detected_language}.srt"
+        # For languages pysbd cannot segment (e.g. Thai), drive sentence splitting
+        # with the SaT neural segmenter; otherwise keep the proven pysbd path.
+        segment_fn = None if detected_language in _PYSBD_LANGS else self._segment_fn
         srt_output = generate_srt(
             result["segments"],
             language=detected_language,
@@ -212,6 +244,7 @@ class Runner(BaseRunner):
             max_cps=max_cps,
             min_duration=min_duration,
             max_duration=max_duration,
+            segment_fn=segment_fn,
         )
         with open(srt_file, "w", encoding="utf-8") as srt:
             srt.write(srt_output)

@@ -14,7 +14,7 @@ Code based on: https://github.com/m-bain/whisperX/issues/883
 Here’s a high-level overview of how it achieves this:
 
 1. **Generate transcription:** Uses WhisperX (faster-whisper-large-v3) to generate transcription with word-level timestamps.
-2. **Sentence Segmentation:** Utilizes the `PySBD` (Python Sentence Boundary Disambiguation) library to split the transcribed text into sentences, respecting language-specific punctuation and sentence boundaries.
+2. **Sentence Segmentation:** Splits the transcribed text into sentences with `PySBD` (Python Sentence Boundary Disambiguation) for the languages it supports; for languages it does not (e.g. Thai), it falls back to the neural [`SaT`/`wtpsplit`](https://github.com/segment-any-text/wtpsplit) segmenter, which handles non-space-delimited and unpunctuated scripts.
 3. **Initial Cue Creation:** For each sentence, the script creates an initial subtitle cue, including start and end times based on word-level timings.
 4. **Cue Merging:**
    - Merges short cues that don't meet a minimum duration (e.g., 3 seconds) to ensure subtitles are displayed long enough for viewers to read.
@@ -104,11 +104,39 @@ characters-per-second reading-speed ceiling, and min/max on-screen duration. The
 linger far past the spoken audio. When `diarization` is enabled, each cue is
 prefixed with its `[SPEAKER_xx]` label.
 
+## Multilingual
+
+Transcription (Whisper large-v3) covers ~99 languages. Word-level timestamps —
+which the subtitle engine needs to time cues — are produced by forced alignment:
+
+- **WhisperX's built-in alignment** (wav2vec2) covers ~41 languages natively.
+- For any **other** language, the model falls back to **MMS forced alignment**
+  (via [`ctc-forced-aligner`](https://github.com/MahmoudAshraf97/ctc-forced-aligner),
+  1000+ languages) so those languages still get word-level cue timing instead of
+  segment-level only. If alignment fails for any reason it degrades gracefully to
+  segment-level timing — it never breaks a request.
+
+> ⚠️ **License:** the MMS alignment weights
+> ([`MahmoudAshraf/mms-300m-1130-forced-aligner`](https://huggingface.co/MahmoudAshraf/mms-300m-1130-forced-aligner),
+> derived from Meta MMS) are **CC-BY-NC 4.0 (non-commercial)**. As of 2026 there is
+> no permissively-licensed broad multilingual aligner. If you need commercial use,
+> swap in a permissively-licensed per-language CTC model for the languages you care
+> about. The SaT segmenter weights (`sat-3l-sm`) and `wtpsplit` are MIT-licensed.
+
+Known limitation: for scripts with no word spacing (Thai, Lao, Khmer, Burmese),
+ASR output is often a single unsegmented run, so MMS produces one timestamp span
+rather than true per-word timing. Per-word timing there needs a word segmenter
+(e.g. `pythainlp`), which is out of scope for now.
+
 ## Download models
 
 ```sh
 ./build.sh
 ```
+
+The multilingual model weights (SaT segmenter and the MMS alignment model) are
+not fetched by `build.sh` — they are pre-cached into the image at build time by
+the `build.run` steps in `cog.yaml`, so cold starts don't download them.
 
 ## Publish to cog
 

@@ -11,7 +11,15 @@ dependencies = [
     "ffmpeg-python",
     "pyannote.audio",
     "whisperx",
+    # Transitive via whisperx, but floored explicitly: <1.2.0 drops word
+    # timestamps for digits/symbols (whisperx >=3.8.4 requires it).
+    "faster-whisper>=1.2.0",
     "pysbd==0.3.4",
+    # Neural multilingual sentence segmentation (Thai/CJK); MIT-licensed.
+    "wtpsplit~=2.2",
+    # MMS forced-alignment fallback for languages outside whisperx's align set.
+    # NOTE: pulls MMS weights at runtime which are CC-BY-NC 4.0 (non-commercial).
+    "ctc-forced-aligner",
 ]
 
 [dependency-groups]
@@ -31,7 +39,10 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
-whisperx = { git = "https://github.com/m-bain/whisperx.git" }
+# Pinned to a specific commit (not a floating HEAD) so re-locks are reproducible.
+whisperx = { git = "https://github.com/m-bain/whisperx.git", rev = "5f2f9d4320dd93a7d12f5ba2495eef7e0a5af963" }
+# git-only (the PyPI `ctc-forced-aligner` is an unrelated package); pinned by commit.
+ctc-forced-aligner = { git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git", rev = "264e7a1f81bff9ff5e787a5537020c2ad0b0df02" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

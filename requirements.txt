@@ -30,16 +30,22 @@ colorlog==6.10.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via optuna
 contourpy==1.3.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via matplotlib
+ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git@264e7a1f81bff9ff5e787a5537020c2ad0b0df02 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via whisperx-subtitles-replicate
 ctranslate2==4.8.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   faster-whisper
     #   whisperx
 cycler==0.12.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via matplotlib
+docopt==0.6.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via mosestokenizer
 einops==0.8.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via pyannote-audio
 faster-whisper==1.2.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
-    # via whisperx
+    # via
+    #   whisperx
+    #   whisperx-subtitles-replicate
 ffmpeg-python==0.2.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via whisperx-subtitles-replicate
 filelock==3.29.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'
@@ -81,6 +87,7 @@ huggingface-hub==0.36.2 ; platform_machine == 'x86_64' and sys_platform == 'linu
     #   tokenizers
     #   transformers
     #   whisperx
+    #   wtpsplit
 idna==3.18 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   requests
@@ -114,6 +121,8 @@ matplotlib==3.11.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via pyannote-audio
 mdurl==0.1.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via markdown-it-py
+mosestokenizer==1.2.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via wtpsplit
 mpmath==1.3.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via sympy
 multidict==6.7.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
@@ -125,7 +134,9 @@ narwhals==2.22.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
 networkx==3.6.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch
 nltk==3.9.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'
-    # via whisperx
+    # via
+    #   ctc-forced-aligner
+    #   whisperx
 numpy==2.4.6 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   asteroid-filterbanks
@@ -140,10 +151,12 @@ numpy==2.4.6 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     #   pytorch-metric-learning
     #   scikit-learn
     #   scipy
+    #   skops
     #   torchmetrics
     #   torchvision
     #   transformers
     #   whisperx
+    #   wtpsplit
 nvidia-cublas-cu12==12.8.4.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   nvidia-cudnn-cu12
@@ -185,6 +198,8 @@ omegaconf==2.3.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via whisperx
 onnxruntime==1.26.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via faster-whisper
+openfile==0.0.7 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via mosestokenizer
 opentelemetry-api==1.42.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -225,6 +240,7 @@ packaging==26.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     #   onnxruntime
     #   optuna
     #   pytorch-lightning
+    #   skops
     #   torch-pitch-shift
     #   torchmetrics
     #   transformers
@@ -234,10 +250,13 @@ pandas==3.0.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     #   pyannote-database
     #   pyannote-metrics
     #   whisperx
+    #   wtpsplit
 pillow==12.2.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   matplotlib
     #   torchvision
+prettytable==3.17.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via skops
 primepy==1.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via torch-pitch-shift
 propcache==0.5.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
@@ -299,6 +318,7 @@ regex==2026.5.9 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   nltk
     #   transformers
+    #   uroman
 requests==2.34.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   huggingface-hub
@@ -315,16 +335,21 @@ scikit-learn==1.9.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   pyannote-metrics
     #   pytorch-metric-learning
+    #   skops
+    #   wtpsplit
 scipy==1.17.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   pyannote-metrics
     #   scikit-learn
+    #   skops
 setuptools==82.0.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   ctranslate2
     #   triton
 six==1.17.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via python-dateutil
+skops==0.14.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via wtpsplit
 sortedcontainers==2.4.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via pyannote-core
 sqlalchemy==2.0.50 ; platform_machine == 'x86_64' and sys_platform == 'linux'
@@ -339,9 +364,12 @@ tokenizers==0.22.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   faster-whisper
     #   transformers
+toolwrapper==2.1.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via mosestokenizer
 torch==2.8.0+cu128 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   asteroid-filterbanks
+    #   ctc-forced-aligner
     #   julius
     #   lightning
     #   pyannote-audio
@@ -367,6 +395,7 @@ torchaudio==2.8.0+cu128 ; platform_machine == 'x86_64' and sys_platform == 'linu
     #   whisperx-subtitles-replicate
 torchcodec==0.7.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
+    #   ctc-forced-aligner
     #   pyannote-audio
     #   whisperx
 torchmetrics==1.9.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
@@ -389,8 +418,12 @@ tqdm==4.68.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     #   pytorch-lightning
     #   pytorch-metric-learning
     #   transformers
+    #   wtpsplit
 transformers==4.57.6 ; platform_machine == 'x86_64' and sys_platform == 'linux'
-    # via whisperx
+    # via
+    #   ctc-forced-aligner
+    #   whisperx
+    #   wtpsplit
 triton==3.4.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   torch
@@ -413,9 +446,19 @@ typing-extensions==4.15.0 ; platform_machine == 'x86_64' and sys_platform == 'li
     #   pytorch-lightning
     #   sqlalchemy
     #   torch
+uctools==1.3.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via mosestokenizer
+unidecode==1.4.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via ctc-forced-aligner
 urllib3==2.7.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via requests
+uroman==1.3.1.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via ctc-forced-aligner
+wcwidth==0.8.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via prettytable
 whisperx @ git+https://github.com/m-bain/whisperx.git@5f2f9d4320dd93a7d12f5ba2495eef7e0a5af963 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via whisperx-subtitles-replicate
+wtpsplit==2.2.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via whisperx-subtitles-replicate
 yarl==1.24.2 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via aiohttp

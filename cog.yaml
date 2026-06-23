@@ -5,4 +5,10 @@ build:
     - "ffmpeg"
   python_version: "3.11"
   python_requirements: requirements.txt
+  # Pre-cache the multilingual model weights into the image's HuggingFace cache so
+  # cold starts don't download them: the SaT sentence segmenter and the MMS
+  # forced-alignment fallback model.
+  run:
+    - "python -c \"from wtpsplit import SaT; SaT('sat-3l-sm')\""
+    - "python -c \"from huggingface_hub import snapshot_download; snapshot_download('MahmoudAshraf/mms-300m-1130-forced-aligner')\""
 run: "predict.py:Runner"

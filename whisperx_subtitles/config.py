@@ -11,6 +11,16 @@ whisper_arch = str(
     Path(__file__).resolve().parent.parent / "models" / "faster-whisper-large-v3"
 )
 
+# Multilingual forced-alignment fallback (ctc-forced-aligner / MMS-300M), used
+# only for languages outside whisperx's built-in alignment set so they still get
+# word-level timestamps. NOTE: the MMS weights are CC-BY-NC 4.0 (NON-COMMERCIAL).
+MMS_ALIGN_MODEL = "MahmoudAshraf/mms-300m-1130-forced-aligner"
+
+# Neural multilingual sentence segmenter (SaT / wtpsplit, MIT-licensed). Used in
+# place of pysbd for languages pysbd does not support (e.g. Thai), which keeps
+# sentence boundaries sane for non-space-delimited and unsupported scripts.
+SAT_MODEL = "sat-3l-sm"
+
 # --- Subtitle formatting defaults (aligned with EBU-TT / Netflix guidelines) ---
 MAX_LINE_LENGTH = 42  # max characters per line
 MAX_LINES = 2  # max lines per cue (hard cap)
