@@ -227,6 +227,84 @@ def test_split_subtitle_uses_config_default_max():
 
 
 # ---------------------------------------------------------------------------
+# split_subtitle  (smart break-point scoring in _balance_two)
+#
+# These pin the NEW behavior: when the text wraps to two lines, the balancer
+# scores candidate break points and prefers a natural linguistic boundary
+# (right after punctuation, not after a short function word, not orphaning a
+# single word) over a purely length-balanced split.
+# ---------------------------------------------------------------------------
+
+
+def test_split_subtitle_breaks_after_punctuation_jfk():
+    # The canonical case: a mid-sentence comma is the most natural break point.
+    # Both halves fit in 42 chars, so the punctuation bonus wins over balance.
+    text = "And so, my fellow Americans, ask not what your country can do for you."
+    lines = _lines(split_subtitle(text, max_chars=42))
+    assert lines == [
+        "And so, my fellow Americans,",
+        "ask not what your country can do for you.",
+    ]
+    assert all(len(line) <= 42 for line in lines)
+
+
+def test_split_subtitle_breaks_after_mid_sentence_comma():
+    # The comma split keeps both lines within budget, so it is chosen even
+    # though a more length-balanced break exists elsewhere.
+    text = "We came for the food, but we stayed for the company"
+    lines = _lines(split_subtitle(text, max_chars=30))
+    assert len(lines) == 2
+    assert lines[0] == "We came for the food,"
+    assert lines[1] == "but we stayed for the company"
+    assert all(len(line) <= 30 for line in lines)
+
+
+def test_split_subtitle_breaks_after_semicolon():
+    # A semicolon is treated like other clause-ending punctuation for breaking.
+    text = "He finished the race; she cheered from the stands"
+    lines = _lines(split_subtitle(text, max_chars=28))
+    assert len(lines) == 2
+    assert lines[0] == "He finished the race;"
+    assert lines[1] == "she cheered from the stands"
+    assert all(len(line) <= 28 for line in lines)
+
+
+def test_split_subtitle_punctuation_break_beats_balanced_split():
+    # The break after the comma is more lopsided in length than a centre split
+    # would be, yet the punctuation bonus makes it the chosen break.
+    text = "Yes, the meeting will start later than usual"
+    lines = _lines(split_subtitle(text, max_chars=40))
+    assert len(lines) == 2
+    assert lines[0] == "Yes,"
+    assert lines[1] == "the meeting will start later than usual"
+
+
+def test_split_subtitle_avoids_orphan_word_line():
+    # Without orphan/widow penalties a greedy or naive balance might leave a
+    # single short word on its own line; the scorer prefers a fuller split.
+    text = "Once upon a time there lived a king"
+    lines = _lines(split_subtitle(text, max_chars=25))
+    assert len(lines) == 2
+    # Neither line is a single orphaned word.
+    assert len(lines[0].split()) > 1
+    assert len(lines[1].split()) > 1
+    assert all(len(line) <= 25 for line in lines)
+
+
+def test_split_subtitle_falls_back_to_balanced_split_without_signal():
+    # No punctuation and no function-word/orphan signal to differentiate the
+    # candidate breaks, so the balancer falls back to minimizing length
+    # imbalance: roughly even halves.
+    text = "alpha beta gamma delta epsilon zeta"
+    lines = _lines(split_subtitle(text, max_chars=20))
+    assert len(lines) == 2
+    assert all(len(line) <= 20 for line in lines)
+    # Even split: three words per line.
+    assert len(lines[0].split()) == 3
+    assert len(lines[1].split()) == 3
+
+
+# ---------------------------------------------------------------------------
 # split_sentence_heuristically  (recursive, punctuation-aware)
 # ---------------------------------------------------------------------------
 

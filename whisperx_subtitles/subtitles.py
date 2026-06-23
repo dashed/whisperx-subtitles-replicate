@@ -20,6 +20,9 @@ import re
 import pysbd
 
 from .config import (
+    LINE_BREAK_FUNCTION_WORD_PENALTY,
+    LINE_BREAK_ORPHAN_PENALTY,
+    LINE_BREAK_PUNCTUATION_BONUS,
     MAX_CPS,
     MAX_DURATION,
     MAX_LEAD_OUT,
@@ -28,6 +31,7 @@ from .config import (
     MERGE_MAX_GAP,
     MIN_DURATION,
     MIN_GAP,
+    PAUSE_THRESHOLD,
 )
 from .types import Cue, Segment, Word
 
@@ -89,17 +93,25 @@ def _greedy_lines(words: list[str], max_chars: int) -> list[list[str]]:
 
 
 def _balance_two(words: list[str], max_chars: int) -> list[list[str]] | None:
-    """Best 2-line split: minimize line-length difference, both <= max_chars,
-    avoiding a break right after a short function word."""
-    best: tuple[int, list[list[str]]] | None = None
+    """Best 2-line split (both lines <= max_chars). Scores candidate break points
+    (lower = better): start from line-length imbalance, reward breaking right
+    after punctuation, penalize breaking after a short function word or leaving a
+    one-word line, so the break lands at a natural linguistic boundary."""
+    best: tuple[float, list[list[str]]] | None = None
     for i in range(1, len(words)):
         left, right = " ".join(words[:i]), " ".join(words[i:])
-        if len(left) <= max_chars and len(right) <= max_chars:
-            penalty = abs(len(left) - len(right))
-            if words[i - 1].lower().strip(",.;:!?") in _NO_BREAK_AFTER:
-                penalty += 1000
-            if best is None or penalty < best[0]:
-                best = (penalty, [words[:i], words[i:]])
+        if len(left) > max_chars or len(right) > max_chars:
+            continue
+        score: float = abs(len(left) - len(right))
+        prev_word = words[i - 1]
+        if prev_word.rstrip().endswith((",", ";", ":", ".", "!", "?", "—", "–")):
+            score -= LINE_BREAK_PUNCTUATION_BONUS
+        if prev_word.lower().strip(",.;:!?\"'") in _NO_BREAK_AFTER:
+            score += LINE_BREAK_FUNCTION_WORD_PENALTY
+        if i == 1 or i == len(words) - 1:  # one-word line on either side
+            score += LINE_BREAK_ORPHAN_PENALTY
+        if best is None or score < best[0]:
+            best = (score, [words[:i], words[i:]])
     return best[1] if best else None
 
 
@@ -249,6 +261,15 @@ def _reading_duration(text: str, max_cps: float = MAX_CPS) -> float:
     return len(text) / max_cps if max_cps > 0 else 0.0
 
 
+def _displayed_length(cue: Cue) -> int:
+    """Characters actually shown on screen, including the [SPEAKER_xx] prefix."""
+    length = len(cue["text"])
+    speaker = cue.get("speaker")
+    if speaker:
+        length += len(f"[{speaker}] ")
+    return length
+
+
 def merge_short_cues(
     cues: list[Cue],
     max_line_length: int = MAX_LINE_LENGTH,
@@ -274,9 +295,9 @@ def merge_short_cues(
             min_duration, _reading_duration(prev["text"], max_cps)
         )
         fits = _line_count(combined_text, max_line_length) <= max_lines
-        cps_ok = (
-            combined_duration <= 0 or len(combined_text) <= max_cps * combined_duration
-        )
+        speaker = prev.get("speaker")
+        combined_len = len(combined_text) + (len(f"[{speaker}] ") if speaker else 0)
+        cps_ok = combined_duration <= 0 or combined_len <= max_cps * combined_duration
         same_speaker = prev.get("speaker") == cue.get("speaker")
         if too_short and fits and cps_ok and 0 <= gap <= max_gap and same_speaker:
             prev["text"] = combined_text
@@ -336,6 +357,41 @@ def split_long_cue_without_word_timings(
         )
         start = chunk_end
     return new_cues
+
+
+def split_at_pauses(
+    cues: list[Cue], pause_threshold: float = PAUSE_THRESHOLD
+) -> list[Cue]:
+    """Split each cue at internal inter-word silences >= pause_threshold, so cue
+    boundaries land on natural speech pauses (better-felt synchronization)."""
+    out: list[Cue] = []
+    for cue in cues:
+        out.extend(_split_cue_at_pauses(cue, pause_threshold))
+    return out
+
+
+def _split_cue_at_pauses(cue: Cue, pause_threshold: float) -> list[Cue]:
+    word_data = cue.get("word_data")
+    words = cue["text"].split()
+    if not word_data or len(words) != len(word_data) or len(word_data) < 2:
+        return [cue]
+    boundaries = [0]
+    for i in range(1, len(word_data)):
+        prev_end = word_data[i - 1].get("end")
+        cur_start = word_data[i].get("start")
+        if (
+            prev_end is not None
+            and cur_start is not None
+            and cur_start - prev_end >= pause_threshold
+        ):
+            boundaries.append(i)
+    boundaries.append(len(word_data))
+    if len(boundaries) <= 2:  # no internal pause found
+        return [cue]
+    return [
+        _make_chunk_cue(words[a:b], word_data[a:b], cue)
+        for a, b in zip(boundaries, boundaries[1:], strict=False)
+    ]
 
 
 def split_long_cues_with_word_timings(
@@ -408,8 +464,10 @@ def normalize_cues(
             start = max(start, out[-1]["end"] + min_gap)
         end = max(end, start)
 
-        # reading-comfort floor: the cue must stay long enough to read
-        reading_end = start + max(min_duration, _reading_duration(cue["text"], max_cps))
+        # reading-comfort floor: the cue must stay long enough to read (counting
+        # the displayed length, including any speaker prefix)
+        reading_secs = _displayed_length(cue) / max_cps if max_cps > 0 else 0.0
+        reading_end = start + max(min_duration, reading_secs)
         end = max(end, reading_end)
 
         # soft cap: prefer not to linger far past the spoken audio, but never
@@ -473,6 +531,7 @@ def generate_srt(
         )
 
     cues = merge_short_cues(cues, max_line_length, max_lines, max_cps, min_duration)
+    cues = split_at_pauses(cues)
     cues = split_long_cues_with_word_timings(cues, max_line_length, max_lines)
     cues = normalize_cues(cues, min_duration, max_duration, max_cps)
 

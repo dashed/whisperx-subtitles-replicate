@@ -26,10 +26,12 @@ from whisperx_subtitles.config import (
     MAX_LEAD_OUT,
     MIN_DURATION,
     MIN_GAP,
+    PAUSE_THRESHOLD,
 )
 from whisperx_subtitles.subtitles import (
     merge_short_cues,
     normalize_cues,
+    split_at_pauses,
     split_at_sentence_end,
     split_long_cue_without_word_timings,
     split_long_cues_with_word_timings,

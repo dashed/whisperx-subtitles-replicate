@@ -19,4 +19,13 @@ MIN_DURATION = 1.0  # min seconds a cue stays on screen
 MAX_DURATION = 7.0  # max seconds a cue stays on screen
 MIN_GAP = 0.083  # min gap between consecutive cues (~2 frames @ 24fps)
 MAX_LEAD_OUT = 1.5  # max seconds a cue may extend past its last spoken word
-MERGE_MAX_GAP = 1.5  # max time gap across which two short cues may be merged
+
+# Treat an inter-word silence >= PAUSE_THRESHOLD as a natural pause: a cue is
+# split there, and two cues are never merged across it.
+PAUSE_THRESHOLD = 0.75
+MERGE_MAX_GAP = PAUSE_THRESHOLD  # max gap across which two short cues may merge
+
+# Line-break scoring (lower score = preferred break point); see _balance_two.
+LINE_BREAK_PUNCTUATION_BONUS = 25  # reward breaking right after , ; : . ! ? —
+LINE_BREAK_FUNCTION_WORD_PENALTY = 30  # avoid breaking after a/the/of/to/...
+LINE_BREAK_ORPHAN_PENALTY = 20  # avoid a one-word line (widow/orphan)
