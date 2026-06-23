@@ -362,8 +362,9 @@ def split_long_cue_without_word_timings(
 def split_at_pauses(
     cues: list[Cue], pause_threshold: float = PAUSE_THRESHOLD
 ) -> list[Cue]:
-    """Split each cue at internal inter-word silences >= pause_threshold, so cue
-    boundaries land on natural speech pauses (better-felt synchronization)."""
+    """Split each cue at internal silences >= pause_threshold that also fall on a
+    clause boundary (the preceding word ends with punctuation), so cue boundaries
+    land on natural pauses without fragmenting a phrase mid-clause."""
     out: list[Cue] = []
     for cue in cues:
         out.extend(_split_cue_at_pauses(cue, pause_threshold))
@@ -379,14 +380,18 @@ def _split_cue_at_pauses(cue: Cue, pause_threshold: float) -> list[Cue]:
     for i in range(1, len(word_data)):
         prev_end = word_data[i - 1].get("end")
         cur_start = word_data[i].get("start")
+        ends_clause = (
+            words[i - 1].rstrip().endswith((",", ";", ":", ".", "!", "?", "—", "–"))
+        )
         if (
             prev_end is not None
             and cur_start is not None
             and cur_start - prev_end >= pause_threshold
+            and ends_clause
         ):
             boundaries.append(i)
     boundaries.append(len(word_data))
-    if len(boundaries) <= 2:  # no internal pause found
+    if len(boundaries) <= 2:  # no qualifying pause found
         return [cue]
     return [
         _make_chunk_cue(words[a:b], word_data[a:b], cue)
