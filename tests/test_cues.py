@@ -183,6 +183,68 @@ class TestSplitAtSentenceEnd:
 
 
 # =========================================================================== #
+# split_at_sentence_end: robustness to word/text count mismatch
+#
+# whisperx may emit an aligned word list that is not 1:1 with the segment text
+# (e.g. a word it could not align is dropped). Blind positional counting would
+# then desync every later cue in the segment; the token-matching aligner keeps
+# each cue anchored to the right word timings.
+# =========================================================================== #
+class TestWordTextAlignmentDrift:
+    def _healthy(self):
+        text = "Alpha bravo charlie delta. Echo foxtrot golf hotel."
+        wd = [W(w, float(i), float(i) + 0.8) for i, w in enumerate(text.split())]
+        return text, wd
+
+    def test_dropped_word_does_not_desync_later_cue(self):
+        text, wd = self._healthy()
+        # whisperx dropped 'charlie' from the aligned list; the text still has it.
+        wd_dropped = [w for w in wd if w["word"] != "charlie"]
+
+        cues = split_at_sentence_end(None, text, wd_dropped)
+
+        assert _texts(cues) == [
+            "Alpha bravo charlie delta.",
+            "Echo foxtrot golf hotel.",
+        ]
+        # Cue 1 still ends at 'delta.' (3.8), not at 'Echo' (4.8); cue 2 still
+        # starts at 'Echo' (4.0), not at 'foxtrot' (5.0).
+        assert cues[0]["end"] == 3.8
+        assert cues[1]["start"] == 4.0
+        assert cues[1]["end"] == 7.8
+
+    def test_matches_positional_when_counts_align(self):
+        # With a healthy 1:1 list the aligner must reproduce the positional slice.
+        text, wd = self._healthy()
+        cues = split_at_sentence_end(None, text, wd)
+
+        assert cues[0]["word_data"] == wd[0:4]
+        assert cues[1]["word_data"] == wd[4:8]
+
+    def test_stray_aligned_word_is_skipped(self):
+        # An extra aligned entry with no matching text token is skipped to resync.
+        wd = [
+            W("Hello", 0.0, 0.5),
+            W("XXX", 0.5, 0.7),  # stray entry, absent from the text
+            W("world.", 0.7, 1.2),
+        ]
+        cues = split_at_sentence_end(None, "Hello world.", wd)
+
+        assert _texts(cues) == ["Hello world."]
+        assert cues[0]["start"] == 0.0
+        assert cues[0]["end"] == 1.2  # 'world.' end, not the stray 'XXX'
+
+    def test_punctuation_differences_still_match(self):
+        # Token punctuation/case need not match the aligned word exactly.
+        wd = [W("Yes,", 0.0, 0.4), W("indeed.", 0.4, 0.9)]
+        cues = split_at_sentence_end(None, "yes indeed", wd)
+
+        assert cues[0]["start"] == 0.0
+        assert cues[0]["end"] == 0.9
+        assert cues[0]["word_data"] == wd
+
+
+# =========================================================================== #
 # merge_short_cues
 # =========================================================================== #
 class TestMergeShortCues:

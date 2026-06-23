@@ -55,6 +55,9 @@ _NO_BREAK_AFTER = {
     "with", "as", "by", "is", "are", "was", "were",
 }  # fmt: skip
 
+# Punctuation stripped when comparing a text token to an aligned word token.
+_TOKEN_STRIP = ",.;:!?\"'()[]{}—–-…«»¿¡"
+
 
 # --------------------------------------------------------------------------- #
 # Timestamp formatting
@@ -190,6 +193,50 @@ def _cue_speaker(words: list[Word] | None) -> str | None:
     return max(set(speakers), key=speakers.count)
 
 
+def _norm_token(tok: str) -> str:
+    """Lowercase, punctuation-stripped form for comparing a text token to an
+    aligned word token (whisperx keeps punctuation attached to words)."""
+    return tok.lower().strip(_TOKEN_STRIP)
+
+
+def _align_clause_words(
+    tokens: list[str], word_data: list[Word], ptr: int
+) -> tuple[list[Word], int]:
+    """Map a clause's text ``tokens`` onto ``word_data`` by string match, starting
+    at ``ptr``; returns the matched word entries and the advanced pointer.
+
+    In the common case (the aligned word list is 1:1 with the text) this is
+    identical to the old positional ``word_data[ptr:ptr+len(tokens)]`` slice. It
+    additionally survives an aligned word list that is *out of step* with the
+    text — e.g. whisperx dropped a word it could not align — which would
+    otherwise make blind positional counting desync every later cue in the
+    segment. A token with no matching word entry contributes its text but no
+    timing, rather than stealing the next word's timestamp."""
+    n = len(word_data)
+    matched: list[Word] = []
+    start_ptr = ptr
+    for tok in tokens:
+        if ptr < n and _norm_token(word_data[ptr]["word"]) == _norm_token(tok):
+            matched.append(word_data[ptr])
+            ptr += 1
+        elif ptr + 1 < n and _norm_token(word_data[ptr + 1]["word"]) == _norm_token(
+            tok
+        ):
+            # word_data[ptr] is a stray entry with no matching token: skip it and
+            # consume the next, which does match, to resync.
+            matched.append(word_data[ptr + 1])
+            ptr += 2
+        # else: this token has no aligned word (dropped by alignment) -> keep the
+        # pointer so the next real word still lines up.
+    if not matched and tokens and start_ptr < n:
+        # Matching failed entirely; fall back to the positional slice so this path
+        # is never worse than the original blind counting.
+        count = len(tokens)
+        matched = word_data[start_ptr : start_ptr + count]
+        ptr = start_ptr + count
+    return matched, ptr
+
+
 def _first_start(words: list[Word]) -> float | None:
     return next((w["start"] for w in words if w.get("start") is not None), None)
 
@@ -210,6 +257,17 @@ def split_at_sentence_end(
     else:
         sentences = _SENTENCE_SPLIT.split(text)
 
+    if word_data and len(text.split()) != len(word_data):
+        # Aligned word list is out of step with the text (e.g. whisperx dropped a
+        # word it could not align). Positional counting would desync; the
+        # string-matching aligner below resyncs per token instead.
+        logger.warning(
+            "word/text count mismatch (%d words vs %d text tokens); "
+            "matching word timings by token to avoid cue desync.",
+            len(word_data),
+            len(text.split()),
+        )
+
     result: list[Cue] = []
     word_index = 0
     for sentence in sentences:
@@ -222,9 +280,9 @@ def split_at_sentence_end(
             clause = clause.strip()
             if not clause:
                 continue
-            count = len(clause.split())
-            clause_words = word_data[word_index : word_index + count]
-            word_index += count
+            clause_words, word_index = _align_clause_words(
+                clause.split(), word_data, word_index
+            )
 
             start = _first_start(clause_words) if clause_words else None
             end = _last_end(clause_words) if clause_words else None
