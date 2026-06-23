@@ -21,8 +21,9 @@ MIN_GAP = 0.083  # min gap between consecutive cues (~2 frames @ 24fps)
 MAX_LEAD_OUT = 1.5  # max seconds a cue may extend past its last spoken word
 
 # Treat an inter-word silence >= PAUSE_THRESHOLD as a natural pause: a cue is
-# split there, and two cues are never merged across it.
-PAUSE_THRESHOLD = 0.75
+# split there, and two cues are never merged across it. Kept fairly high so only
+# genuine pauses split a phrase (a lower value over-fragments dramatic speech).
+PAUSE_THRESHOLD = 1.0
 MERGE_MAX_GAP = PAUSE_THRESHOLD  # max gap across which two short cues may merge
 
 # Line-break scoring (lower score = preferred break point); see _balance_two.
