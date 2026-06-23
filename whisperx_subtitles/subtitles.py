@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 
 import pysbd
 
@@ -251,8 +252,13 @@ def split_at_sentence_end(
     word_data: list[Word],
     max_line_length: int = MAX_LINE_LENGTH,
     max_lines: int = MAX_LINES,
+    segment_fn: Callable[[str], list[str]] | None = None,
 ) -> list[Cue]:
-    if segmenter is not None:
+    # Sentence boundaries: prefer an injected neural segmenter (e.g. SaT/wtpsplit,
+    # supplied by the GPU side for Thai/CJK), else pysbd, else a regex fallback.
+    if segment_fn is not None:
+        sentences = segment_fn(text)
+    elif segmenter is not None:
         sentences = segmenter.segment(text)
     else:
         sentences = _SENTENCE_SPLIT.split(text)
@@ -570,16 +576,20 @@ def generate_srt(
     max_cps: float = MAX_CPS,
     min_duration: float = MIN_DURATION,
     max_duration: float = MAX_DURATION,
+    segment_fn: Callable[[str], list[str]] | None = None,
 ) -> str:
+    # When a neural segmenter is injected it handles every language (incl. Thai/
+    # CJK), so skip building pysbd entirely; otherwise fall back to pysbd/regex.
     segmenter = None
-    try:
-        segmenter = pysbd.Segmenter(language=language, clean=False)
-    except Exception as e:  # pysbd raises for unsupported languages
-        logger.warning(
-            "pysbd segmenter unavailable for language %r (%s); using regex fallback",
-            language,
-            e,
-        )
+    if segment_fn is None:
+        try:
+            segmenter = pysbd.Segmenter(language=language, clean=False)
+        except Exception as e:  # pysbd raises for unsupported languages
+            logger.warning(
+                "pysbd segmenter unavailable for language %r (%s); using regex fallback",
+                language,
+                e,
+            )
 
     cues: list[Cue] = []
     for segment in segments:
@@ -590,6 +600,7 @@ def generate_srt(
                 segment.get("words", []),
                 max_line_length,
                 max_lines,
+                segment_fn,
             )
         )
 

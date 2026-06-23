@@ -245,6 +245,46 @@ class TestWordTextAlignmentDrift:
 
 
 # =========================================================================== #
+# split_at_sentence_end: injectable segment_fn (SaT/wtpsplit hook)
+# =========================================================================== #
+class TestSegmentFn:
+    def test_segment_fn_overrides_pysbd_boundaries(self):
+        # The injected fn's sentence boundaries are honored verbatim; each
+        # resulting cue is anchored to the matching word timings.
+        wd = [W(w, float(i), float(i) + 0.8) for i, w in enumerate("a b c d".split())]
+        cues = split_at_sentence_end(
+            None, "a b c d", wd, segment_fn=lambda t: ["a b", "c d"]
+        )
+        assert _texts(cues) == ["a b", "c d"]
+        assert cues[0]["word_data"] == wd[0:2]
+        assert cues[1]["word_data"] == wd[2:4]
+
+    def test_segment_fn_takes_priority_over_segmenter(self):
+        # Even when a (regex/pysbd-style) segmenter would be available, an
+        # explicit segment_fn wins.
+        class FakeSeg:
+            def segment(self, text):
+                return [text]  # would produce ONE sentence
+
+        wd = [W(w, float(i), float(i) + 0.5) for i, w in enumerate("a b c d".split())]
+        cues = split_at_sentence_end(
+            FakeSeg(), "a b c d", wd, segment_fn=lambda t: ["a b", "c d"]
+        )
+        assert _texts(cues) == ["a b", "c d"]
+
+    def test_segment_fn_works_for_unsupported_language_text(self):
+        # Thai (no pysbd support) — segment_fn drives the split; no crash.
+        thai = "หนึ่ง สอง สาม สี่"
+        wd = [W(w, float(i), float(i) + 0.5) for i, w in enumerate(thai.split())]
+        cues = split_at_sentence_end(
+            None, thai, wd, segment_fn=lambda t: ["หนึ่ง สอง", "สาม สี่"]
+        )
+        assert _texts(cues) == ["หนึ่ง สอง", "สาม สี่"]
+        assert cues[0]["start"] == 0.0
+        assert cues[1]["start"] == 2.0
+
+
+# =========================================================================== #
 # merge_short_cues
 # =========================================================================== #
 class TestMergeShortCues:

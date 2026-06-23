@@ -406,3 +406,35 @@ def test_custom_max_cps_respected():
     max_cps = 10.0
     blocks = _parse_srt(generate_srt(_two_segments(), "en", max_cps=max_cps))
     _assert_cps(blocks, max_cps)
+
+
+# --------------------------------------------------------------------------- #
+# Injectable sentence segmenter (segment_fn) — the hook the GPU side uses to
+# plug in SaT/wtpsplit for Thai/CJK without importing torch into this module.
+# (Cue-boundary precision is unit-tested against split_at_sentence_end in
+# test_cues.py; here we assert end-to-end validity and that the hook is used.)
+# --------------------------------------------------------------------------- #
+def test_segment_fn_path_produces_valid_srt_for_unsupported_language():
+    # With segment_fn supplied, pysbd is never constructed, so an unsupported
+    # language (Thai has no pysbd support) must still yield valid SRT, no crash.
+    thai = "หนึ่ง สอง สาม สี่ ห้า หก เจ็ด แปด เก้า สิบ"
+    words, _ = _mk_words(thai)
+    called = []
+
+    def segment_fn(t):
+        called.append(t)
+        return [p for p in t.split("  ") if p.strip()] or [t]
+
+    blocks = _parse_srt(
+        generate_srt([{"text": thai, "words": words}], "th", segment_fn=segment_fn)
+    )
+    assert called, "segment_fn was not invoked"
+    assert blocks
+    assert [b.index for b in blocks] == list(range(1, len(blocks) + 1))
+
+
+def test_no_segment_fn_keeps_pysbd_behaviour():
+    # Sanity: omitting segment_fn reproduces the standard pysbd path.
+    without = generate_srt([_segment(JFK_TEXT)], "en")
+    explicit_none = generate_srt([_segment(JFK_TEXT)], "en", segment_fn=None)
+    assert without == explicit_none
