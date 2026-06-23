@@ -45,6 +45,11 @@ def _mk_words(text, t0=0.0, dur=0.4, gap=0.05, speaker=None):
 
 
 JFK_TEXT = "And so my fellow Americans ask not what your country can do for you"
+# Same line, but punctuated: the mid-sentence commas are the natural break points
+# a good wrapper should prefer over splitting mid-clause.
+JFK_PUNCTUATED = (
+    "And so, my fellow Americans, ask not what your country can do for you."
+)
 LONG_TEXT = (
     "The quick brown fox jumps over the lazy dog while the sleepy cat watches "
     "from the windowsill and the birds sing in the bright morning sunshine."
@@ -175,6 +180,29 @@ def test_max_lines_per_cue():
 
 
 # --------------------------------------------------------------------------- #
+# Linguistic line breaking (#1)
+# --------------------------------------------------------------------------- #
+def test_line_break_lands_at_punctuation_not_mid_clause():
+    # The JFK line wraps to two lines; with a mid-sentence comma available, the
+    # wrapper should break right after it (a natural clause boundary) rather than
+    # in the middle of a clause. Slower per-word timings keep it a single cue
+    # whose text must wrap, exercising the line-break scorer end-to-end.
+    words, _ = _mk_words(JFK_PUNCTUATED, 0.0, dur=0.6)
+    blocks = _parse_srt(generate_srt([{"text": JFK_PUNCTUATED, "words": words}], "en"))
+    # Find the (single) cue carrying this sentence and assert it is two lines
+    # whose first line ends at the comma.
+    two_line = [b for b in blocks if len(b.text_lines) == 2]
+    assert two_line, f"expected a wrapped 2-line cue, got {[b.text for b in blocks]}"
+    b = two_line[0]
+    assert b.text_lines[0].rstrip().endswith(","), (
+        f"first line should break at the comma, got {b.text_lines[0]!r}"
+    )
+    assert b.text_lines[0].rstrip() == "And so, my fellow Americans,", (
+        f"unexpected break point: {b.text_lines[0]!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Synchronization
 # --------------------------------------------------------------------------- #
 def test_timings_ordered_and_non_overlapping():
@@ -223,6 +251,47 @@ def test_speaker_prefix_present_when_diarized():
         assert len(first) <= MAX_LINE_LENGTH
 
 
+def test_speaker_prefix_counts_toward_reading_time():
+    # Reading-time accuracy (#4): the on-screen ``[SPEAKER_xx] `` prefix is real
+    # text the viewer must read, so normalize_cues counts it toward the CPS floor.
+    # The SAME short, fast-spoken line therefore stays on screen LONGER when it
+    # carries a speaker label than when it doesn't (~13 extra chars of budget).
+    #
+    # Timings are tight (dur small) and min_duration is lowered so the cue is
+    # reading-time-bound, not pinned at the MIN_DURATION floor -- otherwise both
+    # would hit the same floor and the prefix's effect would be invisible.
+    text = "The quick brown fox jumps over the lazy dog now"
+
+    plain_words, _ = _mk_words(text, 0.0, dur=0.2, gap=0.02)
+    diar_words, _ = _mk_words(text, 0.0, dur=0.2, gap=0.02, speaker="SPEAKER_00")
+
+    plain = _parse_srt(
+        generate_srt([{"text": text, "words": plain_words}], "en", min_duration=0.5)
+    )
+    diar = _parse_srt(
+        generate_srt([{"text": text, "words": diar_words}], "en", min_duration=0.5)
+    )
+
+    # The short line stays a single cue in both runs, so we can compare directly.
+    assert len(plain) == 1 and len(diar) == 1, (
+        f"expected one cue each; got plain={len(plain)} diar={len(diar)}"
+    )
+    p, d = plain[0], diar[0]
+
+    # Sanity: both are reading-time-bound, not stuck at the lowered min_duration.
+    assert p.duration > 0.5 + EPSILON and d.duration > 0.5 + EPSILON, (
+        f"cues hit min_duration floor (plain={p.duration}, diar={d.duration}); "
+        "the prefix effect would be unobservable"
+    )
+    assert d.text_lines[0].startswith("[SPEAKER_00] ")
+
+    # The prefix adds reading-time budget, so the diarized cue is on screen longer.
+    assert d.duration > p.duration + EPSILON, (
+        f"speaker prefix did not extend reading time: diar={d.duration:.3f} "
+        f"!> plain={p.duration:.3f}"
+    )
+
+
 def test_no_speaker_prefix_when_undiarized():
     blocks = _parse_srt(generate_srt(_two_segments(), "en"))
     for b in blocks:
@@ -252,6 +321,44 @@ def test_unsupported_language_falls_back_to_valid_srt():
 
 def test_empty_segments_returns_empty_string():
     assert generate_srt([], "en") == ""
+
+
+# --------------------------------------------------------------------------- #
+# Global invariants re-confirmed over the new (punctuated / diarized) inputs
+# --------------------------------------------------------------------------- #
+def _assert_global_invariants(blocks):
+    """Lines fit, cues stay within max_lines, and timings are ordered, valid,
+    and non-overlapping. (_parse_srt already enforces the strict arrow-line
+    timestamp regex, incl. seconds in 00-59, as it parses.)
+
+    Line-length is checked against the wrapped *text body*: the wrapper sizes the
+    body, and the optional ``[SPEAKER_xx] `` prefix is rendered on top of the
+    first line (so it may push that one line past MAX_LINE_LENGTH). This matches
+    the existing test_speaker_prefix_present_when_diarized convention.
+    """
+    assert blocks
+    for b in blocks:
+        for i, line in enumerate(b.text_lines):
+            body = _strip_speaker(line) if i == 0 else line
+            assert len(body) <= MAX_LINE_LENGTH, (
+                f"line over {MAX_LINE_LENGTH}: {body!r} ({len(body)})"
+            )
+        assert len(b.text_lines) <= MAX_LINES, f"too many lines: {b.text!r}"
+        assert b.end >= b.start - EPSILON, f"end before start: {b.text!r}"
+    assert [b.index for b in blocks] == list(range(1, len(blocks) + 1))
+    for prev, nxt in zip(blocks, blocks[1:], strict=False):
+        assert nxt.start >= prev.start - EPSILON, "cue starts went backwards"
+        assert prev.end <= nxt.start + EPSILON, f"cue overlap: {prev.end}>{nxt.start}"
+
+
+def test_global_invariants_hold_for_punctuated_and_diarized_inputs():
+    punct_words, _ = _mk_words(JFK_PUNCTUATED, 0.0, dur=0.6)
+    diar = _two_segments(speaker="SPEAKER_00")
+    for srt in (
+        generate_srt([{"text": JFK_PUNCTUATED, "words": punct_words}], "en"),
+        generate_srt(diar, "en"),
+    ):
+        _assert_global_invariants(_parse_srt(srt))
 
 
 # --------------------------------------------------------------------------- #

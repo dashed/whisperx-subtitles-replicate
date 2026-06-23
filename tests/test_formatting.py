@@ -270,13 +270,14 @@ def test_split_subtitle_breaks_after_semicolon():
 
 
 def test_split_subtitle_punctuation_break_beats_balanced_split():
-    # The break after the comma is more lopsided in length than a centre split
-    # would be, yet the punctuation bonus makes it the chosen break.
-    text = "Yes, the meeting will start later than usual"
-    lines = _lines(split_subtitle(text, max_chars=40))
+    # The break after the comma leaves the two lines slightly less balanced than
+    # a more central break would, yet the punctuation bonus makes it the chosen
+    # break (and neither side is a single orphaned word).
+    text = "When the rain stopped, we walked along the river"
+    lines = _lines(split_subtitle(text, max_chars=30))
     assert len(lines) == 2
-    assert lines[0] == "Yes,"
-    assert lines[1] == "the meeting will start later than usual"
+    assert lines[0] == "When the rain stopped,"
+    assert lines[1] == "we walked along the river"
 
 
 def test_split_subtitle_avoids_orphan_word_line():

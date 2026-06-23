@@ -537,12 +537,14 @@ def generate_srt(
 
     output_srt = ""
     for index, cue in enumerate(cues, start=1):
-        text = split_subtitle(cue["text"], max_chars=max_line_length)
         speaker = cue.get("speaker")
         prefix = f"[{speaker}] " if speaker else ""
+        # Wrap the prefix together with the text so the [SPEAKER_xx] tag counts
+        # toward the line width (otherwise the first line could overflow).
+        text = split_subtitle(f"{prefix}{cue['text']}", max_chars=max_line_length)
         output_srt += f"{index}\n"
         output_srt += (
             f"{format_timestamp(cue['start'])} --> {format_timestamp(cue['end'])}\n"
         )
-        output_srt += f"{prefix}{text}\n\n"
+        output_srt += f"{text}\n\n"
     return output_srt

@@ -257,6 +257,135 @@ class TestMergeShortCues:
     def test_empty_list(self):
         assert merge_short_cues([]) == []
 
+    def test_merge_when_gap_just_under_pause_threshold(self):
+        # Same speaker, prev too short to read, combined fits within line/CPS
+        # budgets; the gap is just below PAUSE_THRESHOLD (the default max_gap) so
+        # the merge is allowed. Combined "Hello world how are you" is 23 chars and
+        # the ~2.0s combined span keeps CPS (~11.5) under MAX_CPS=17.
+        gap = PAUSE_THRESHOLD - 0.05
+        cues = [
+            C("Hello world", 0.0, 0.9, speaker="A"),
+            C("how are you", 0.9 + gap, 2.0, speaker="A"),
+        ]
+        out = merge_short_cues(cues)
+
+        assert len(out) == 1
+        assert out[0]["text"] == "Hello world how are you"
+        assert out[0]["end"] == 2.0
+
+    def test_no_merge_when_gap_just_over_pause_threshold(self):
+        # Identical timings/CPS headroom to the above but the gap is just above
+        # PAUSE_THRESHOLD: the lowered max_gap default rejects the merge across a
+        # natural pause. (Only the gap differs, so this isolates the threshold.)
+        gap = PAUSE_THRESHOLD + 0.05
+        cues = [
+            C("Hello world", 0.0, 0.9, speaker="A"),
+            C("how are you", 0.9 + gap, 2.0, speaker="A"),
+        ]
+        out = merge_short_cues(cues)
+
+        assert len(out) == 2
+        assert _texts(out) == ["Hello world", "how are you"]
+
+
+# =========================================================================== #
+# split_at_pauses
+# =========================================================================== #
+class TestSplitAtPauses:
+    def test_splits_at_internal_pause(self):
+        # Gap between word[1].end (0.7) and word[2].start (0.7+PAUSE_THRESHOLD)
+        # is exactly PAUSE_THRESHOLD -> split into two pieces there.
+        second_start = 0.7 + PAUSE_THRESHOLD
+        wd = [
+            W("Hello", 0.0, 0.4),
+            W("world", 0.4, 0.7),
+            W("how", second_start, second_start + 0.3),
+            W("are", second_start + 0.3, second_start + 0.6),
+            W("you", second_start + 0.6, second_start + 0.9),
+        ]
+        cue = C("Hello world how are you", 0.0, wd[-1]["end"], wd, speaker="A")
+        out = split_at_pauses([cue])
+
+        assert len(out) == 2
+        # Text concatenates back to the original word order.
+        assert _reassemble(out) == "Hello world how are you".split()
+        # Each piece's start/end come from its own words.
+        assert out[0]["start"] == 0.0
+        assert out[0]["end"] == 0.7
+        assert out[1]["start"] == second_start
+        assert out[1]["end"] == wd[-1]["end"]
+        # Each piece carries its own word_data slice.
+        assert out[0]["word_data"] == wd[0:2]
+        assert out[1]["word_data"] == wd[2:5]
+
+    def test_no_split_when_all_gaps_under_threshold(self):
+        # Every inter-word gap is below PAUSE_THRESHOLD -> returned unchanged.
+        wd = [
+            W("Hello", 0.0, 0.4),
+            W("world", 0.4, 0.7),
+            W("how", 0.7 + (PAUSE_THRESHOLD - 0.1), 1.3),
+        ]
+        cue = C("Hello world how", 0.0, wd[-1]["end"], wd)
+        out = split_at_pauses([cue])
+
+        assert len(out) == 1
+        assert out[0] is cue
+
+    def test_word_data_none_unchanged(self):
+        cue = C("Hello world how", 0.0, 2.0, word_data=None)
+        out = split_at_pauses([cue])
+        assert out == [cue]
+        assert out[0] is cue
+
+    def test_word_count_mismatch_unchanged(self):
+        # len(words) != len(word_data) -> cannot align, returned unchanged even
+        # though the (mismatched) word data contains a large gap.
+        wd = [W("Hello", 0.0, 0.4), W("world", 0.4 + PAUSE_THRESHOLD + 1.0, 5.0)]
+        cue = C("Hello world how are you", 0.0, 5.0, wd)
+        out = split_at_pauses([cue])
+        assert out == [cue]
+        assert out[0] is cue
+
+    def test_single_word_unchanged(self):
+        wd = [W("Hello", 0.0, 0.4)]
+        cue = C("Hello", 0.0, 0.4, wd)
+        out = split_at_pauses([cue])
+        assert out == [cue]
+        assert out[0] is cue
+
+    def test_multiple_pauses_produce_multiple_pieces(self):
+        # Two internal pauses -> three pieces.
+        wd = [
+            W("a", 0.0, 0.3),
+            W("b", 0.3 + PAUSE_THRESHOLD, 0.3 + PAUSE_THRESHOLD + 0.3),
+        ]
+        t2 = wd[-1]["end"]
+        wd.append(W("c", t2 + PAUSE_THRESHOLD, t2 + PAUSE_THRESHOLD + 0.3))
+        cue = C("a b c", 0.0, wd[-1]["end"], wd)
+        out = split_at_pauses([cue])
+
+        assert len(out) == 3
+        assert _texts(out) == ["a", "b", "c"]
+        assert _reassemble(out) == ["a", "b", "c"]
+        for piece, w in zip(out, wd, strict=True):
+            assert piece["start"] == w["start"]
+            assert piece["end"] == w["end"]
+            assert piece["word_data"] == [w]
+
+    def test_uses_custom_pause_threshold(self):
+        # A gap of 0.5 splits when pause_threshold=0.4 but not at the 0.75 default.
+        wd = [
+            W("Hello", 0.0, 0.4),
+            W("world", 0.9, 1.2),  # gap of 0.5
+        ]
+        cue = C("Hello world", 0.0, 1.2, wd)
+
+        assert len(split_at_pauses([cue])) == 1  # default 0.75 -> no split
+        assert len(split_at_pauses([cue], pause_threshold=0.4)) == 2
+
+    def test_empty_list(self):
+        assert split_at_pauses([]) == []
+
 
 # =========================================================================== #
 # split_long_cue_without_word_timings
