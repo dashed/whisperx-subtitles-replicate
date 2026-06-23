@@ -128,6 +128,31 @@ ASR output is often a single unsegmented run, so MMS produces one timestamp span
 rather than true per-word timing. Per-word timing there needs a word segmenter
 (e.g. `pythainlp`), which is out of scope for now.
 
+## Translation
+
+Set the `translate_to` input (an ISO code like `en`, `es`, `ja`) to output
+subtitles in a different language than the audio. Naive per-cue translation is
+deliberately **not** used — it loses sentence context and breaks on word-order
+differences (e.g. Korean SOV → English SVO) and length changes. Instead the model
+runs a **cascade**:
+
+1. Transcribe + align in the **source** language → word-level timestamps.
+2. Reconstruct full **sentences** with their `[start, end]` spans.
+3. Translate each whole sentence (context preserved) with
+   [MADLAD-400](https://huggingface.co/google/madlad400-3b-mt) (Apache-2.0, 400+
+   languages, any→any).
+4. Re-segment each translation into cues and distribute the source sentence's
+   time span across them **proportionally by character count**, so the
+   translation stays synced to the audio.
+
+The translation model is loaded lazily (only when `translate_to` is set), so
+normal transcription requests don't pay its cost. For higher translation quality
+you can swap `MT_MODEL` in `config.py` for a larger MADLAD or an LLM translator.
+
+Limitation: translation re-timing is proportional, not word-aligned (the
+translated words aren't in the audio); if a translated sentence is much longer
+than its source span, reading speed may exceed the target CPS.
+
 ## Download models
 
 ```sh

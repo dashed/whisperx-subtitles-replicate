@@ -9,7 +9,7 @@ supported-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-16T02:26:42.378537Z"
+exclude-newer = "2026-06-16T04:58:15.477562Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -1269,6 +1269,15 @@ wheels = [
 ]
 
 [[package]]
+name = "sentencepiece"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/15/15/2e7a025fc62d764b151ae6d0f2a92f8081755ebe8d4a64099accc6f77ba6/sentencepiece-0.2.1.tar.gz", hash = "sha256:8138cec27c2f2282f4a34d9a016e3374cd40e5c6e9cb335063db66a0a3b71fad", size = 3228515, upload-time = "2025-08-12T07:00:51.718Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/66/fb191403ade791ad2c3c1e72fe8413e63781b08cfa3aa4c9dfc536d6e795/sentencepiece-0.2.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4f5a3e0d9f445ed9d66c0fec47d4b23d12cfc858b407a03c194c1b26c2ac2a63", size = 1387785, upload-time = "2025-08-12T06:59:32.491Z" },
+]
+
+[[package]]
 name = "setuptools"
 version = "82.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1610,6 +1619,7 @@ dependencies = [
     { name = "ffmpeg-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "pyannote-audio", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "pysbd", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "sentencepiece", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torchaudio", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torchvision", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1631,6 +1641,7 @@ requires-dist = [
     { name = "ffmpeg-python" },
     { name = "pyannote-audio" },
     { name = "pysbd", specifier = "==0.3.4" },
+    { name = "sentencepiece" },
     { name = "torch", specifier = "~=2.8.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchaudio", specifier = "~=2.8.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", specifier = "~=0.23.0", index = "https://download.pytorch.org/whl/cu128" },

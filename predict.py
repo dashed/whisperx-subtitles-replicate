@@ -10,12 +10,17 @@ from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF, DEFAULT_ALIGN_MODELS_TOR
 
 from whisperx_subtitles.audio import distribute_segments_equally, get_audio_duration
 from whisperx_subtitles.config import (
+    MT_MODEL,
     SAT_MODEL,
     compute_type,
     device,
     whisper_arch,
 )
-from whisperx_subtitles.subtitles import generate_srt
+from whisperx_subtitles.subtitles import (
+    generate_srt,
+    generate_translated_srt,
+    sentences_with_spans,
+)
 from whisperx_subtitles.transcription import align, align_mms, detect_language, diarize
 
 logging.basicConfig(level=logging.INFO)
@@ -55,11 +60,56 @@ class Runner(BaseRunner):
         self.sat = SaT(SAT_MODEL)
         self.sat.half().to(device)
 
+        # Translation model (MADLAD-400) is loaded lazily on first use, so
+        # non-translation requests don't pay its VRAM/load cost.
+        self._mt = None
+
     def _segment_fn(self, text):
         """Sentence-split with SaT; the hook generate_srt uses for non-pysbd langs."""
         if not text or not text.strip():
             return []
         return [s for s in self.sat.split(text) if s.strip()]
+
+    def _translate(self, texts, target):
+        """Translate each source sentence into `target` (ISO code) with MADLAD-400.
+        MADLAD auto-detects the source; the target is set by a "<2xx>" prefix."""
+        if self._mt is None:
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(MT_MODEL)
+            model = (
+                AutoModelForSeq2SeqLM.from_pretrained(
+                    MT_MODEL, torch_dtype=torch.float16
+                )
+                .to(device)
+                .eval()
+            )
+            self._mt = (model, tokenizer)
+        model, tokenizer = self._mt
+
+        out = []
+        for text in texts:
+            if not text.strip():
+                out.append("")
+                continue
+            ids = tokenizer(f"<2{target}> {text}", return_tensors="pt").input_ids.to(
+                device
+            )
+            gen = model.generate(input_ids=ids, max_new_tokens=512)
+            out.append(tokenizer.decode(gen[0], skip_special_tokens=True).strip())
+        return out
+
+    def _source_segmenter(self, language):
+        """Return (pysbd_segmenter, segment_fn) for splitting SOURCE-language text
+        into sentences: pysbd where supported, else the SaT neural segmenter."""
+        if language in _PYSBD_LANGS:
+            import pysbd
+
+            try:
+                return pysbd.Segmenter(language=language, clean=False), None
+            except Exception:
+                return None, self._segment_fn
+        return None, self._segment_fn
 
     def run(
         self,
@@ -94,6 +144,13 @@ class Runner(BaseRunner):
         align_output: bool = Input(
             description="Aligns whisper output to get accurate word-level timestamps",
             default=True,
+        ),
+        translate_to: str | None = Input(
+            description="Translate subtitles into this target language (ISO code, e.g. "
+            "'en', 'es', 'ja'). Leave blank for no translation. Translation is done "
+            "per source-sentence and re-timed onto the original audio; requires "
+            "align_output so the source has accurate timing.",
+            default=None,
         ),
         diarization: bool = Input(
             description="Assign speaker ID labels", default=False
@@ -232,20 +289,40 @@ class Runner(BaseRunner):
                 )
 
         audio_basename = os.path.basename(str(audio_file)).rsplit(".", 1)[0]
-        srt_file = f"/tmp/{audio_basename}.{detected_language}.srt"
         # For languages pysbd cannot segment (e.g. Thai), drive sentence splitting
         # with the SaT neural segmenter; otherwise keep the proven pysbd path.
-        segment_fn = None if detected_language in _PYSBD_LANGS else self._segment_fn
-        srt_output = generate_srt(
-            result["segments"],
-            language=detected_language,
-            max_line_length=max_line_length,
-            max_lines=max_lines,
-            max_cps=max_cps,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            segment_fn=segment_fn,
-        )
+        segmenter, segment_fn = self._source_segmenter(detected_language)
+
+        if translate_to:
+            # Cascade: reconstruct full SOURCE sentences with spans, translate each
+            # (with sentence context), then re-segment + re-time onto the source
+            # timing. Avoids the naive per-cue translation that breaks word order.
+            lang_tag = f"{detected_language}-{translate_to}"
+            srt_file = f"/tmp/{audio_basename}.{lang_tag}.srt"
+            sentences = sentences_with_spans(result["segments"], segmenter, segment_fn)
+            translations = self._translate([s["text"] for s in sentences], translate_to)
+            for sentence, translation in zip(sentences, translations, strict=True):
+                sentence["text"] = translation
+            srt_output = generate_translated_srt(
+                sentences,
+                max_line_length=max_line_length,
+                max_lines=max_lines,
+                max_cps=max_cps,
+                min_duration=min_duration,
+                max_duration=max_duration,
+            )
+        else:
+            srt_file = f"/tmp/{audio_basename}.{detected_language}.srt"
+            srt_output = generate_srt(
+                result["segments"],
+                language=detected_language,
+                max_line_length=max_line_length,
+                max_lines=max_lines,
+                max_cps=max_cps,
+                min_duration=min_duration,
+                max_duration=max_duration,
+                segment_fn=segment_fn,
+            )
         with open(srt_file, "w", encoding="utf-8") as srt:
             srt.write(srt_output)
 

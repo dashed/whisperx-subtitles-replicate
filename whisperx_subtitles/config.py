@@ -21,6 +21,12 @@ MMS_ALIGN_MODEL = "MahmoudAshraf/mms-300m-1130-forced-aligner"
 # sentence boundaries sane for non-space-delimited and unsupported scripts.
 SAT_MODEL = "sat-3l-sm"
 
+# Text machine-translation model for the `translate_to` feature (MADLAD-400,
+# Apache-2.0, 400+ languages, any->any via a "<2{target}>" token). Loaded lazily
+# (only when a translation is requested). Swap for a larger MADLAD (7b/10b) or an
+# LLM translator for higher quality.
+MT_MODEL = "google/madlad400-3b-mt"
+
 # --- Subtitle formatting defaults (aligned with EBU-TT / Netflix guidelines) ---
 MAX_LINE_LENGTH = 42  # max characters per line
 MAX_LINES = 2  # max lines per cue (hard cap)

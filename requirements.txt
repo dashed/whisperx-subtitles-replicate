@@ -342,6 +342,8 @@ scipy==1.17.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     #   pyannote-metrics
     #   scikit-learn
     #   skops
+sentencepiece==0.2.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via whisperx-subtitles-replicate
 setuptools==82.0.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
     # via
     #   ctranslate2

@@ -20,6 +20,8 @@ dependencies = [
     # MMS forced-alignment fallback for languages outside whisperx's align set.
     # NOTE: pulls MMS weights at runtime which are CC-BY-NC 4.0 (non-commercial).
     "ctc-forced-aligner",
+    # SentencePiece tokenizer for the MADLAD-400 translation model (T5-based).
+    "sentencepiece",
 ]
 
 [dependency-groups]

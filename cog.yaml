@@ -11,4 +11,5 @@ build:
   run:
     - "python -c \"from wtpsplit import SaT; SaT('sat-3l-sm')\""
     - "python -c \"from huggingface_hub import snapshot_download; snapshot_download('MahmoudAshraf/mms-300m-1130-forced-aligner')\""
+    - "python -c \"from huggingface_hub import snapshot_download; snapshot_download('google/madlad400-3b-mt')\""
 run: "predict.py:Runner"
